@@ -8,21 +8,23 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 
 from .document import Document, DocumentType
+from ..core.logging import AsyncLogger, LogLevel
 
 
 class ChunkMetadata(BaseModel):
     """分块元数据"""
     chunk_id: str
     doc_id: str
-    start_pos: int
-    end_pos: int
+    start_char: int
+    end_char: int
+    text_len: int
     extra: Dict[str, Any] = {}
 
 
 @dataclass
 class Chunk:
     """文档分块"""
-    content: Any
+    text: str
     metadata: ChunkMetadata
 
 
@@ -38,8 +40,25 @@ class ChunkerConfig(BaseModel):
 class Chunker(ABC):
     """分块器抽象基类"""
     
-    def __init__(self, config: ChunkerConfig):
+    def __init__(self, config: ChunkerConfig, logger: Optional[AsyncLogger] = None):
+        """初始化分块器
+        
+        Args:
+            config: 分块器配置
+            logger: 可选的日志记录器
+        """
         self.config = config
+        self.logger = logger
+    
+    async def _log(self, level: LogLevel, message: str):
+        """内部日志记录方法
+        
+        Args:
+            level: 日志级别
+            message: 日志消息
+        """
+        if self.logger:
+            await self.logger.log(level, message)
     
     @abstractmethod
     async def split(self, document: Document) -> List[Chunk]:
@@ -52,7 +71,7 @@ class Chunker(ABC):
         pass
     
     @abstractmethod
-    async def merge(self, chunks: List[Chunk]) -> Document:
+    async def merge(self, chunks: List[Chunk]) -> Chunk:
         """将块合并为文档"""
         pass
 
@@ -87,8 +106,9 @@ class TextChunker(Chunker):
             metadata = ChunkMetadata(
                 chunk_id=f"{document.metadata.doc_id}_{start}_{end}",
                 doc_id=document.metadata.doc_id,
-                start_pos=start,
-                end_pos=end
+                start_char=start,
+                end_char=end,
+                text_len=len(chunk_content)
             )
             
             chunks.append(Chunk(chunk_content, metadata))
@@ -106,21 +126,21 @@ class TextChunker(Chunker):
             results.append(chunks)
         return results
     
-    async def merge(self, chunks: List[Chunk]) -> Document:
+    async def merge(self, chunks: List[Chunk]) -> Chunk:
         """将文本块合并为文档"""
         # 按照起始位置排序
-        sorted_chunks = sorted(chunks, key=lambda x: x.metadata.start_pos)
+        sorted_chunks = sorted(chunks, key=lambda x: x.metadata.start_char)
         
         # 合并文本
         merged_text = ""
         last_end = 0
         
         for chunk in sorted_chunks:
-            if chunk.metadata.start_pos > last_end:
+            if chunk.metadata.start_char > last_end:
                 # 处理缺失的部分
-                merged_text += " " * (chunk.metadata.start_pos - last_end)
-            merged_text += chunk.content
-            last_end = chunk.metadata.end_pos
+                merged_text += " " * (chunk.metadata.start_char - last_end)
+            merged_text += chunk.text
+            last_end = chunk.metadata.end_char
             
         # 创建新的文档
         from .document import TextDocument, DocumentMetadata
@@ -131,7 +151,14 @@ class TextChunker(Chunker):
             created_at="",  # 需要设置实际时间
         )
         
-        return TextDocument(merged_text, metadata)
+        return Chunk(merged_text, ChunkMetadata(
+            chunk_id=f"{chunks[0].metadata.doc_id}_merged",
+            doc_id=chunks[0].metadata.doc_id,
+            start_char=0,
+            end_char=len(merged_text),
+            text_len=len(merged_text),
+            extra={}
+        ))
 
 
 class ChunkerRegistry:

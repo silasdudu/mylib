@@ -11,7 +11,7 @@ from base.dialogue.memory import (Memory, MemoryConfig, Message, MessageRole,
 from base.model.interface import LargeModel, ModelConfig, ModelResponse
 from base.rag.chunking import ChunkerConfig, TextChunker
 from base.rag.document import DocumentParser, DocumentType, TextDocument
-from base.rag.embedding import DenseEmbeddingModel, EmbeddingConfig
+from base.model.embedding import DenseEmbeddingModel, EmbeddingConfig
 from base.rag.generator import GeneratorConfig, RAGGenerator
 from base.rag.retriever import RetrieverConfig, VectorRetriever
 from base.search.engine import SearchConfig, SearchEngine, SearchResult

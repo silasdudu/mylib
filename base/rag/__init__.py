@@ -4,7 +4,7 @@ RAG（Retrieval-Augmented Generation）模块，提供文档处理、检索和�
 
 from .document import *
 from .chunking import *
-from .embedding import *
+from ..model.embedding import *
 from .retriever import *
 from .search import *
 from .generator import *

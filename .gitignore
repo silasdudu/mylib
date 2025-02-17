@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+*.log
+
+# 项目特定
+*.db
+*.sqlite3
+.env.local
+.env.*.local
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# 依赖管理
+poetry.lock
+
+# 日志和数据文件
+logs/
+*.log
+data/
+temp/
+tmp/
+
+# 模型和大文件
+*.pkl
+*.h5
+*.model
+*.bin
+*.onnx
+*.pt
+*.pth 
+*.docx
+*.pdf
+*.txt
+*.csv
+*.json
+*.yaml
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.doc
+*.docx

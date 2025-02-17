@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 from pydantic import BaseModel
 
-from .chunking import Chunk
+from ..rag.chunking import Chunk
 
 
 class EmbeddingConfig(BaseModel):

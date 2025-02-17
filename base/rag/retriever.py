@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 
 from .chunking import Chunk
-from .embedding import EmbeddingModel, EmbeddingOutput
+from ..model.embedding import EmbeddingModel, EmbeddingOutput
 
 
 class RetrieverConfig(BaseModel):

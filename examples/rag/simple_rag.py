@@ -5,50 +5,18 @@ import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Type
 
 from base.core.logging import AsyncLogger, ConsoleLogHandler, LogLevel
 from base.model.interface import LargeModel, ModelConfig, ModelResponse
-from base.rag.chunking import ChunkerConfig, TextChunker
-from base.rag.document import (Document, DocumentMetadata, DocumentParser,
-                             DocumentType, TextDocument)
-from base.rag.embedding import DenseEmbeddingModel, EmbeddingConfig, EmbeddingOutput
+from base.rag.chunking import ChunkerConfig
+from base.rag.document import (Document, DocumentType, DocumentParserRegistry)
+from base.model.embedding import DenseEmbeddingModel, EmbeddingConfig, EmbeddingOutput
 from base.rag.generator import GeneratorConfig, GeneratorInput, RAGGenerator
 from base.rag.retriever import RetrieverConfig, VectorRetriever, SearchResult
-
-
-class SimpleDocumentParser(DocumentParser):
-    """简单的文本文档解析器"""
-    
-    async def parse(self, file_path: Path, doc_type: DocumentType) -> Document:
-        """解析文本文件"""
-        if doc_type != DocumentType.TEXT:
-            raise ValueError("仅支持文本文档")
-            
-        # 读取文件内容
-        content = file_path.read_text(encoding="utf-8")
-        
-        # 创建元数据
-        metadata = DocumentMetadata(
-            doc_id=file_path.stem,
-            doc_type=DocumentType.TEXT,
-            source=str(file_path),
-            created_at=datetime.now().isoformat()
-        )
-        
-        return TextDocument(content, metadata)
-    
-    async def parse_batch(
-        self,
-        file_paths: List[Path],
-        doc_types: List[DocumentType]
-    ) -> List[Document]:
-        """批量解析文档"""
-        documents = []
-        for file_path, doc_type in zip(file_paths, doc_types):
-            doc = await self.parse(file_path, doc_type)
-            documents.append(doc)
-        return documents
+from rag.parsers import (ExcelParser, MarkdownParser, PDFParser, TextParser,
+                        WordParser)
+from rag.chunkers import SentenceChunker
 
 
 class SimpleEmbeddingModel(DenseEmbeddingModel):
@@ -136,18 +104,98 @@ class SimpleVectorRetriever(VectorRetriever):
             self._index.pop(chunk_id, None)
 
 
+def setup_parser_registry(logger: AsyncLogger) -> DocumentParserRegistry:
+    """设置文档解析器注册表
+    
+    Args:
+        logger: 日志记录器
+        
+    Returns:
+        配置好的文档解析器注册表
+    """
+    registry = DocumentParserRegistry()
+    
+    # 注册文本解析器
+    registry.register(
+        DocumentType.TEXT,
+        TextParser(logger=logger),
+        ['.txt']
+    )
+    
+    # 注册PDF解析器
+    registry.register(
+        DocumentType.PDF,
+        PDFParser(logger=logger, extract_images=False),
+        ['.pdf']
+    )
+    
+    # 注册Word解析器
+    registry.register(
+        DocumentType.WORD,
+        WordParser(logger=logger),
+        ['.docx']
+    )
+    
+    # 注册Excel解析器
+    registry.register(
+        DocumentType.EXCEL,
+        ExcelParser(logger=logger),
+        ['.xlsx', '.xls']
+    )
+    
+    # 注册Markdown解析器
+    registry.register(
+        DocumentType.MARKDOWN,
+        MarkdownParser(logger=logger),
+        ['.md']
+    )
+    
+    return registry
+
+
+async def process_document(file_path: Path, registry: DocumentParserRegistry, logger: AsyncLogger) -> Document:
+    """处理单个文档
+    
+    Args:
+        file_path: 文档路径
+        registry: 文档解析器注册表
+        logger: 日志记录器
+        
+    Returns:
+        解析后的文档对象
+        
+    Raises:
+        ValueError: 当文件类型不支持时抛出
+    """
+    try:
+        parser, doc_type = registry.get_parser_for_file(file_path)
+        return await parser.parse(file_path, doc_type)
+    except ValueError as e:
+        await logger.log(LogLevel.ERROR, str(e))
+        raise
+
+
 async def main():
     # 设置日志
     logger = AsyncLogger()
     logger.add_handler(ConsoleLogHandler())
     await logger.log(LogLevel.INFO, "初始化RAG系统...")
     
-    # 初始化组件
-    doc_parser = SimpleDocumentParser()
-    chunker = TextChunker(ChunkerConfig(
-        chunk_size=1000,
-        chunk_overlap=100
-    ))
+    # 初始化解析器注册表
+    parser_registry = setup_parser_registry(logger)
+    await logger.log(LogLevel.INFO, f"支持的文件类型: {parser_registry.list_supported_extensions()}")
+    
+    # 初始化其他组件
+    chunker = SentenceChunker(
+        config=ChunkerConfig(
+            chunk_size=1000,
+            chunk_overlap=100
+        ),
+        sentence_end_chars='.!?。！？',  # 支持中英文标点
+        min_sentence_length=10,  # 最小句子长度
+        logger=logger
+    )
+    
     embedding_model = SimpleEmbeddingModel(EmbeddingConfig(
         model_name="simple_embedding",
         dimension=768
@@ -166,28 +214,37 @@ async def main():
     )
     
     # 加载和处理文档
-    docs_dir = Path("docs")  # 文档目录
+    docs_dir = Path(__file__).parent / "docs"
     if not docs_dir.exists():
         await logger.log(LogLevel.ERROR, f"文档目录 {docs_dir} 不存在")
         return
         
-    # 解析文档
+    # 解析所有支持的文档
     documents = []
-    for file_path in docs_dir.glob("*.txt"):
-        doc = await doc_parser.parse(file_path, DocumentType.TEXT)
-        documents.append(doc)
+    for file_path in docs_dir.iterdir():
+        if parser_registry.is_supported_extension(file_path.suffix):
+            try:
+                doc = await process_document(file_path, parser_registry, logger)
+                documents.append(doc)
+            except Exception as e:
+                await logger.log(LogLevel.ERROR, f"处理文件 {file_path} 时出错: {str(e)}")
+                continue
     
-    await logger.log(LogLevel.INFO, f"加载了 {len(documents)} 个文档")
+    await logger.log(LogLevel.INFO, f"成功加载了 {len(documents)} 个文档")
     
     # 文档分块
     all_chunks = []
+    await logger.log(LogLevel.INFO, "开始文档分块...")
     for doc in documents:
+        await logger.log(LogLevel.INFO, f"处理文档: {doc.metadata.doc_id}")
         chunks = await chunker.split(doc)
+        await logger.log(LogLevel.INFO, f"文档 {doc.metadata.doc_id} 生成了 {len(chunks)} 个块")
         all_chunks.extend(chunks)
     
-    await logger.log(LogLevel.INFO, f"生成了 {len(all_chunks)} 个文档块")
+    await logger.log(LogLevel.INFO, f"总共生成了 {len(all_chunks)} 个文档块")
     
     # 构建索引
+    await logger.log(LogLevel.INFO, "开始构建索引...")
     await retriever.index(all_chunks)
     await logger.log(LogLevel.INFO, "索引构建完成")
     
@@ -215,4 +272,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

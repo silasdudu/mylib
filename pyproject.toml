@@ -29,11 +29,18 @@ librosa = "^0.10.1"
 azure-cognitiveservices-speech = "^1.34.0"  # Azure语音服务
 # 3D渲染和动画
 pyglet = "^2.0.10"  # 简单3D渲染
-open3d = "^0.17.0"  # 3D模型处理
+open3d = "^0.19.0"  # 3D模型处理
 # 机器学习
 torch = "^2.1.0"
 transformers = "^4.36.0"
 sentence-transformers = "^2.2.2"
+# 文档处理
+pymupdf = "^1.21.1"  # PDF处理
+python-docx = "^0.8.11"  # Word文档处理
+pandas = "^1.5.0"  # 数据处理
+openpyxl = "^3.0.10"  # Excel文件处理
+markdown = "^3.4.1"  # Markdown处理
+beautifulsoup4 = "^4.11.1"  # HTML处理
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0.0"
