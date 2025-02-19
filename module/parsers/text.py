@@ -67,6 +67,12 @@ class TextParser(DocumentParser):
             await self._log(LogLevel.ERROR, f"无法用支持的编码解析文件: {file_path}")
             raise UnicodeError(f"无法用支持的编码解析文件: {file_path}")
             
+        # 清理文本内容
+        # 1. 将多个连续空白字符替换为单个空格
+        content = ' '.join(content.split())
+        # 2. 将多个连续换行符替换为双换行符
+        content = '\n\n'.join(p.strip() for p in content.split('\n') if p.strip())
+            
         # 创建文档元数据
         metadata = DocumentMetadata(
             doc_id=file_path.stem,

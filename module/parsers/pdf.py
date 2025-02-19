@@ -61,7 +61,11 @@ class PDFParser(DocumentParser):
             for page_num in range(len(pdf_document)):
                 await self._log(LogLevel.DEBUG, f"处理第 {page_num + 1} 页")
                 page = pdf_document[page_num]
-                content += page.get_text()
+                # 获取页面文本并清理
+                page_text = page.get_text()
+                # 清理空白字符
+                page_text = ' '.join(line.strip() for line in page_text.split('\n') if line.strip())
+                content += page_text + '\n\n'
                 
                 # 如果需要提取图片
                 if self.extract_images:

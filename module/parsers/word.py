@@ -57,8 +57,9 @@ class WordParser(DocumentParser):
             # 提取段落文本
             await self._log(LogLevel.DEBUG, f"开始处理段落，共 {len(doc.paragraphs)} 个段落")
             for i, paragraph in enumerate(doc.paragraphs, 1):
-                if paragraph.text.strip():
-                    content.append(paragraph.text)
+                text = paragraph.text.strip()
+                if text:  # 只添加非空段落
+                    content.append(text)
                     await self._log(LogLevel.DEBUG, f"处理第 {i} 个段落")
             
             # 提取表格文本
@@ -68,13 +69,15 @@ class WordParser(DocumentParser):
                 for row in table.rows:
                     row_text = []
                     for cell in row.cells:
-                        if cell.text.strip():
-                            row_text.append(cell.text.strip())
-                    if row_text:
+                        cell_text = cell.text.strip()
+                        if cell_text:  # 只添加非空单元格
+                            row_text.append(cell_text)
+                    if row_text:  # 只添加非空行
                         content.append(" | ".join(row_text))
             
             # 合并所有文本，使用双换行符分隔
-            full_content = "\n\n".join(content)
+            # 确保每个段落前后没有多余的空白字符
+            full_content = '\n\n'.join(content)
             
             # 创建元数据
             metadata = DocumentMetadata(

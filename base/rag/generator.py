@@ -134,7 +134,7 @@ class RAGGenerator(Generator):
         """格式化RAG提示词"""
         # 将上下文组织成文本
         context_text = "\n\n".join([
-            f"[{i+1}] {result.chunk.content}"
+            f"[{i+1}] {result.chunk.text}"
             for i, result in enumerate(context)
         ])
         

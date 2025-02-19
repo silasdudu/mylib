@@ -68,7 +68,10 @@ class ExcelParser(DocumentParser):
                 
                 # 将数据框转换为字符串表示
                 # 包含列名作为表头
-                content_parts.append(df.to_string(index=False))
+                df_string = df.to_string(index=False)
+                # 清理空白行和多余空白
+                cleaned_lines = [line.strip() for line in df_string.split('\n') if line.strip()]
+                content_parts.append('\n'.join(cleaned_lines))
                 
                 # 统计信息
                 total_rows += len(df)

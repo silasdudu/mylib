@@ -14,94 +14,32 @@ from base.rag.document import (Document, DocumentType, DocumentParserRegistry)
 from base.model.embedding import DenseEmbeddingModel, EmbeddingConfig, EmbeddingOutput
 from base.rag.generator import GeneratorConfig, GeneratorInput, RAGGenerator
 from base.rag.retriever import RetrieverConfig, VectorRetriever, SearchResult
-from rag.parsers import (ExcelParser, MarkdownParser, PDFParser, TextParser,
+from base.rag.vectordb import VectorDBConfig
+from module.parsers import (ExcelParser, MarkdownParser, PDFParser, TextParser,
                         WordParser)
-from rag.chunkers import SentenceChunker
+from module.chunkers import SentenceChunker
+from module.models.embedding import GTEQwenEmbedding
+from module.models.llm.custom import CustomLLM, CustomLLMConfig
+from module.vectordbs.chroma import ChromaVectorDB, ChromaVectorDBConfig
+from dotenv import load_dotenv
 
+# 加载环境变量
+env_path = Path(__file__).parent.parent.parent / '.env'
+load_dotenv(env_path)
 
-class SimpleEmbeddingModel(DenseEmbeddingModel):
-    """简单的嵌入模型（仅作示例）"""
-    
-    async def embed(self, text: str) -> EmbeddingOutput:
-        """生成文本嵌入（这里使用随机向量作为示例）"""
-        import numpy as np
-        vector = np.random.randn(self.config.dimension)
-        if self.config.normalize:
-            vector = self.normalize_vector(vector)
-        return EmbeddingOutput(vector=vector.tolist())
+# 获取通义千问配置
+api_key = os.getenv('QWEN_72B_API_KEY')
+base_url = os.getenv('QWEN_72B_BASE_URL')
+model_name = os.getenv('QWEN_72B_MODEL_NAME')
 
+if not all([api_key, base_url, model_name]):
+    raise ValueError(
+        "必需的环境变量未设置。请在 .env 文件中设置以下变量：\n"
+        "- QWEN_72B_API_KEY\n"
+        "- QWEN_72B_BASE_URL\n"
+        "- QWEN_72B_MODEL_NAME"
+    )
 
-class SimpleLargeModel(LargeModel):
-    """简单的大模型（仅作示例）"""
-    
-    async def generate(
-        self,
-        prompt: str,
-        config: ModelConfig = None
-    ) -> ModelResponse:
-        """生成文本（示例实现）"""
-        # 这里应该实现实际的大模型调用
-        # 示例中仅返回一个固定回答
-        return ModelResponse(
-            text="这是一个示例回答。在实际应用中，这里应该是大模型生成的回答。",
-            tokens_used=10,
-            finish_reason="completed"
-        )
-    
-    async def generate_stream(
-        self,
-        prompt: str,
-        config: ModelConfig = None
-    ):
-        """流式生成（示例实现）"""
-        response = await self.generate(prompt, config)
-        yield response.text
-    
-    async def embed(self, text: str):
-        """生成文本嵌入（示例实现）"""
-        raise NotImplementedError()
-
-
-class SimpleVectorRetriever(VectorRetriever):
-    """简单的向量检索器（仅作示例）"""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._index = {}  # 简单的内存存储
-    
-    async def index(self, chunks, embeddings=None):
-        """索引文档块"""
-        if not embeddings:
-            embeddings = await self.embedding_model.embed_chunks(chunks)
-        
-        for chunk, embedding in zip(chunks, embeddings):
-            self._index[chunk.metadata.chunk_id] = {
-                "chunk": chunk,
-                "vector": embedding.vector
-            }
-    
-    async def search(self, query: str, top_k: int = None):
-        """搜索相关内容（示例实现：随机返回结果）"""
-        import random
-        k = top_k or self.config.top_k
-        results = []
-        
-        # 随机选择k个结果
-        items = list(self._index.values())
-        if items:
-            selected = random.sample(items, min(k, len(items)))
-            for item in selected:
-                results.append(SearchResult(
-                    chunk=item["chunk"],
-                    score=random.random()
-                ))
-        
-        return sorted(results, key=lambda x: x.score, reverse=True)
-    
-    async def delete(self, chunk_ids: List[str]):
-        """删除索引"""
-        for chunk_id in chunk_ids:
-            self._index.pop(chunk_id, None)
 
 
 def setup_parser_registry(logger: AsyncLogger) -> DocumentParserRegistry:
@@ -196,57 +134,91 @@ async def main():
         logger=logger
     )
     
-    embedding_model = SimpleEmbeddingModel(EmbeddingConfig(
-        model_name="simple_embedding",
-        dimension=768
-    ))
-    retriever = SimpleVectorRetriever(
-        config=RetrieverConfig(top_k=3),
-        embedding_model=embedding_model
+    # 使用 CustomEmbedding
+    embedding_model = GTEQwenEmbedding()  # 使用默认配置，从 .env 加载
+    
+    # 使用 ChromaVectorDB
+    persist_directory = Path(__file__).parent / "data" / "chroma"
+    vector_db = ChromaVectorDB(
+        config=ChromaVectorDBConfig(
+            dimension=3584,  # 与嵌入模型维度匹配
+            top_k=3,
+            distance_metric="cosine",
+            persist_directory=str(persist_directory),
+            collection_name="document_chunks"
+        ),
+        logger=logger
     )
-    large_model = SimpleLargeModel()
+    
+    # 使用 CustomLLM
+    large_model = CustomLLM(
+        config=CustomLLMConfig(
+            model_name=model_name,
+            api_url=base_url,
+            api_key=api_key,
+            temperature=0.7,
+            max_tokens=2048
+        )
+    )
+    
     generator = RAGGenerator(
         config=GeneratorConfig(
             max_input_tokens=4096,
-            max_output_tokens=1024
+            max_output_tokens=1024,
+            prompt_template=(
+                "请根据以下背景信息回答问题。如果无法从背景信息中得到答案，请明确说明。\n\n"
+                "背景信息：\n{context}\n\n"
+                "问题：{query}\n\n"
+                "回答："
+            )
         ),
         model=large_model
     )
     
-    # 加载和处理文档
+    # 检查是否需要重新构建索引
     docs_dir = Path(__file__).parent / "docs"
     if not docs_dir.exists():
         await logger.log(LogLevel.ERROR, f"文档目录 {docs_dir} 不存在")
         return
+    
+    # 如果数据库为空，则重新构建索引
+    if not vector_db.is_ready:
+        await logger.log(LogLevel.INFO, "数据库为空，开始构建索引...")
         
-    # 解析所有支持的文档
-    documents = []
-    for file_path in docs_dir.iterdir():
-        if parser_registry.is_supported_extension(file_path.suffix):
-            try:
-                doc = await process_document(file_path, parser_registry, logger)
-                documents.append(doc)
-            except Exception as e:
-                await logger.log(LogLevel.ERROR, f"处理文件 {file_path} 时出错: {str(e)}")
-                continue
-    
-    await logger.log(LogLevel.INFO, f"成功加载了 {len(documents)} 个文档")
-    
-    # 文档分块
-    all_chunks = []
-    await logger.log(LogLevel.INFO, "开始文档分块...")
-    for doc in documents:
-        await logger.log(LogLevel.INFO, f"处理文档: {doc.metadata.doc_id}")
-        chunks = await chunker.split(doc)
-        await logger.log(LogLevel.INFO, f"文档 {doc.metadata.doc_id} 生成了 {len(chunks)} 个块")
-        all_chunks.extend(chunks)
-    
-    await logger.log(LogLevel.INFO, f"总共生成了 {len(all_chunks)} 个文档块")
-    
-    # 构建索引
-    await logger.log(LogLevel.INFO, "开始构建索引...")
-    await retriever.index(all_chunks)
-    await logger.log(LogLevel.INFO, "索引构建完成")
+        # 解析所有支持的文档
+        documents = []
+        for file_path in docs_dir.iterdir():
+            if parser_registry.is_supported_extension(file_path.suffix):
+                try:
+                    doc = await process_document(file_path, parser_registry, logger)
+                    documents.append(doc)
+                except Exception as e:
+                    await logger.log(LogLevel.ERROR, f"处理文件 {file_path} 时出错: {str(e)}")
+                    continue
+        
+        await logger.log(LogLevel.INFO, f"成功加载了 {len(documents)} 个文档")
+        
+        # 文档分块
+        all_chunks = []
+        await logger.log(LogLevel.INFO, "开始文档分块...")
+        for doc in documents:
+            await logger.log(LogLevel.INFO, f"处理文档: {doc.metadata.doc_id}")
+            chunks = await chunker.split(doc)
+            await logger.log(LogLevel.INFO, f"文档 {doc.metadata.doc_id} 生成了 {len(chunks)} 个块")
+            all_chunks.extend(chunks)
+        
+        await logger.log(LogLevel.INFO, f"总共生成了 {len(all_chunks)} 个文档块")
+        
+        # 生成嵌入向量并构建索引
+        await logger.log(LogLevel.INFO, "开始生成嵌入向量...")
+        embeddings = await embedding_model.embed_chunks(all_chunks)
+        vectors = [e.vector for e in embeddings]
+        
+        await logger.log(LogLevel.INFO, "开始构建索引...")
+        await vector_db.create_index(vectors, all_chunks)
+        await logger.log(LogLevel.INFO, "索引构建完成")
+    else:
+        await logger.log(LogLevel.INFO, "使用现有数据库，跳过索引构建")
     
     # 处理用户查询
     while True:
@@ -254,8 +226,11 @@ async def main():
         if query.lower() == 'q':
             break
             
+        # 生成查询向量
+        query_embedding = await embedding_model.embed(query)
+        
         # 检索相关文档
-        results = await retriever.search(query)
+        results = await vector_db.search(query_embedding.vector)
         await logger.log(LogLevel.INFO, f"找到 {len(results)} 个相关文档块")
         
         # 生成回答

@@ -62,7 +62,9 @@ class MarkdownParser(DocumentParser):
             if self.strip_html:
                 await self._log(LogLevel.DEBUG, "移除HTML标签")
                 soup = BeautifulSoup(html_content, 'html.parser')
-                text_content = soup.get_text(separator='\n\n')
+                # 获取文本并清理空白
+                paragraphs = [p.strip() for p in soup.get_text(separator='\n').split('\n') if p.strip()]
+                text_content = '\n\n'.join(paragraphs)
             else:
                 text_content = html_content
             
