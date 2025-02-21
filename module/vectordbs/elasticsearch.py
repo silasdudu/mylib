@@ -9,7 +9,7 @@ from elasticsearch import AsyncElasticsearch
 from elasticsearch.helpers import async_bulk
 
 from base.rag.vectordb import VectorDB, VectorDBConfig, SearchResult
-from base.rag.chunking import Chunk
+from base.rag.chunking import Chunk, ChunkMetadata
 from base.core.logging import LogLevel
 
 
@@ -29,30 +29,23 @@ class ElasticsearchVectorDBConfig(VectorDBConfig):
 class ElasticsearchVectorDB(VectorDB):
     """基于 Elasticsearch 的向量数据库实现"""
     
-    def __init__(self, config: ElasticsearchVectorDBConfig, **kwargs):
+    def __init__(self, config: ElasticsearchVectorDBConfig, logger: Optional[AsyncLogger] = None):
         """初始化 Elasticsearch 向量数据库
         
         Args:
             config: 数据库配置
-            **kwargs: 额外的参数，传递给父类
+            logger: 可选的日志记录器
         """
-        super().__init__(config, **kwargs)
+        super().__init__(config, logger)
         self.config: ElasticsearchVectorDBConfig = config
         
-        # 创建客户端
-        auth = {}
-        if self.config.username and self.config.password:
-            auth["basic_auth"] = (self.config.username, self.config.password)
-        elif self.config.api_key:
-            auth["api_key"] = self.config.api_key
-            
+        # 初始化 ES 客户端
         self._client = AsyncElasticsearch(
-            hosts=self.config.hosts,
-            **auth
+            hosts=config.hosts,
+            api_key=config.api_key,
+            basic_auth=(config.username, config.password) if config.username else None
         )
         
-        self._chunks = {}
-    
     async def _create_index(self) -> None:
         """创建 Elasticsearch 索引"""
         # 定义索引映射
@@ -73,7 +66,10 @@ class ElasticsearchVectorDB(VectorDB):
                             "ef_construction": self.config.ef_construction
                         }
                     },
-                    "metadata": {"type": "object"}
+                    "metadata": {
+                        "type": "object",
+                        "enabled": True
+                    }
                 }
             },
             "settings": {
@@ -94,33 +90,27 @@ class ElasticsearchVectorDB(VectorDB):
             index=self.config.index_name,
             body=mapping
         )
-    
-    def _prepare_document(
-        self,
-        chunk: Chunk,
-        vector: List[float]
-    ) -> Dict[str, Any]:
-        """准备要索引的文档
+        
+    def _doc_to_chunk(self, doc: Dict[str, Any]) -> Chunk:
+        """从 ES 文档构建 Chunk 对象
         
         Args:
-            chunk: 文档块
-            vector: 向量
+            doc: ES 文档
             
         Returns:
-            ES文档
+            Chunk 对象
         """
-        return {
-            "_index": self.config.index_name,
-            "_id": chunk.metadata.chunk_id,
-            "_source": {
-                "chunk_id": chunk.metadata.chunk_id,
-                "doc_id": chunk.metadata.doc_id,
-                "text": chunk.text,
-                "vector": vector,
-                "metadata": chunk.metadata.model_dump()
-            }
-        }
-    
+        metadata = doc.get("metadata", {})
+        chunk_metadata = ChunkMetadata(
+            chunk_id=doc["chunk_id"],
+            doc_id=doc.get("doc_id", ""),
+            start_char=metadata.get("start_char", 0),
+            end_char=metadata.get("end_char", len(doc["text"])),
+            text_len=len(doc["text"]),
+            extra=metadata
+        )
+        return Chunk(text=doc["text"], metadata=chunk_metadata)
+        
     async def create_index(self, vectors: List[List[float]], chunks: List[Chunk]) -> None:
         """创建向量索引
         
@@ -128,7 +118,7 @@ class ElasticsearchVectorDB(VectorDB):
             vectors: 向量列表
             chunks: 对应的文档块列表
         """
-        await self._log(LogLevel.INFO, f"创建 Elasticsearch 索引，向量数量: {len(vectors)}")
+        await self._log(LogLevel.INFO, f"创建索引，向量数量: {len(vectors)}")
         
         # 验证向量格式
         vectors_array = self._validate_vectors(vectors)
@@ -136,24 +126,33 @@ class ElasticsearchVectorDB(VectorDB):
         # 创建索引
         await self._create_index()
         
-        # 准备批量索引的文档
-        actions = [
-            self._prepare_document(chunk, vector.tolist())
-            for chunk, vector in zip(chunks, vectors_array)
-        ]
-        
-        # 批量索引文档
+        # 准备批量索引数据
+        actions = []
+        for vector, chunk in zip(vectors_array, chunks):
+            action = {
+                "_index": self.config.index_name,
+                "_id": chunk.metadata.chunk_id,
+                "_source": {
+                    "chunk_id": chunk.metadata.chunk_id,
+                    "doc_id": chunk.metadata.doc_id,
+                    "text": chunk.text,
+                    "vector": vector.tolist(),
+                    "metadata": {
+                        "start_char": chunk.metadata.start_char,
+                        "end_char": chunk.metadata.end_char,
+                        "text_len": chunk.metadata.text_len,
+                        **(chunk.metadata.extra or {})
+                    }
+                }
+            }
+            actions.append(action)
+            
+        # 批量索引
         await async_bulk(self._client, actions)
         
-        # 刷新索引
-        await self._client.indices.refresh(index=self.config.index_name)
-        
-        # 存储文档块映射
-        self._chunks = {chunk.metadata.chunk_id: chunk for chunk in chunks}
-        
         self._index_ready = True
-        await self._log(LogLevel.INFO, "Elasticsearch 索引创建完成")
-    
+        await self._log(LogLevel.INFO, "索引创建完成")
+        
     async def add_vectors(self, vectors: List[List[float]], chunks: List[Chunk]) -> None:
         """添加向量到索引
         
@@ -161,69 +160,55 @@ class ElasticsearchVectorDB(VectorDB):
             vectors: 向量列表
             chunks: 对应的文档块列表
         """
-        if not self._index_ready:
-            await self.create_index(vectors, chunks)
-            return
-            
-        await self._log(LogLevel.INFO, f"添加向量到 Elasticsearch 索引，数量: {len(vectors)}")
+        await self._log(LogLevel.INFO, f"添加向量，数量: {len(vectors)}")
         
         # 验证向量格式
         vectors_array = self._validate_vectors(vectors)
         
-        # 准备批量索引的文档
-        actions = [
-            self._prepare_document(chunk, vector.tolist())
-            for chunk, vector in zip(chunks, vectors_array)
-        ]
-        
-        # 批量索引文档
-        await async_bulk(self._client, actions)
-        
-        # 刷新索引
-        await self._client.indices.refresh(index=self.config.index_name)
-        
-        # 更新文档块映射
-        for chunk in chunks:
-            self._chunks[chunk.metadata.chunk_id] = chunk
+        # 准备批量索引数据
+        actions = []
+        for vector, chunk in zip(vectors_array, chunks):
+            action = {
+                "_index": self.config.index_name,
+                "_id": chunk.metadata.chunk_id,
+                "_source": {
+                    "chunk_id": chunk.metadata.chunk_id,
+                    "doc_id": chunk.metadata.doc_id,
+                    "text": chunk.text,
+                    "vector": vector.tolist(),
+                    "metadata": {
+                        "start_char": chunk.metadata.start_char,
+                        "end_char": chunk.metadata.end_char,
+                        "text_len": chunk.metadata.text_len,
+                        **(chunk.metadata.extra or {})
+                    }
+                }
+            }
+            actions.append(action)
             
+        # 批量索引
+        await async_bulk(self._client, actions)
         await self._log(LogLevel.INFO, "向量添加完成")
-    
+        
     async def delete_vectors(self, chunk_ids: List[str]) -> None:
         """从索引中删除向量
         
         Args:
             chunk_ids: 要删除的文档块ID列表
         """
-        if not self._index_ready:
-            await self._log(LogLevel.WARNING, "索引尚未创建")
-            return
-            
         await self._log(LogLevel.INFO, f"删除向量，数量: {len(chunk_ids)}")
         
-        # 构建删除查询
-        body = {
-            "query": {
-                "terms": {
-                    "chunk_id": chunk_ids
-                }
-            }
-        }
-        
-        # 执行删除
-        await self._client.delete_by_query(
-            index=self.config.index_name,
-            body=body
-        )
-        
-        # 刷新索引
-        await self._client.indices.refresh(index=self.config.index_name)
-        
-        # 更新文档块映射
+        # 构建批量删除请求
+        body = []
         for chunk_id in chunk_ids:
-            self._chunks.pop(chunk_id, None)
+            body.extend([
+                {"delete": {"_index": self.config.index_name, "_id": chunk_id}}
+            ])
             
+        # 执行批量删除
+        await self._client.bulk(body=body)
         await self._log(LogLevel.INFO, "向量删除完成")
-    
+        
     async def search(
         self,
         query_vector: List[float],
@@ -255,15 +240,14 @@ class ElasticsearchVectorDB(VectorDB):
                 "script_score": {
                     "query": {"match_all": {}},
                     "script": {
-                        "source": "knn_score",
+                        "source": "cosineSimilarity(params.query_vector, 'vector') + 1.0",
                         "params": {
-                            "field": "vector",
-                            "query_value": query_array[0].tolist(),
-                            "space_type": self.config.similarity
+                            "query_vector": query_array[0].tolist()
                         }
                     }
                 }
-            }
+            },
+            "_source": ["chunk_id", "doc_id", "text", "metadata"]
         }
         
         # 添加过滤条件
@@ -284,18 +268,15 @@ class ElasticsearchVectorDB(VectorDB):
         # 构建结果
         search_results = []
         for hit in response["hits"]["hits"]:
-            chunk_id = hit["_source"]["chunk_id"]
-            if chunk_id in self._chunks:
-                chunk = self._chunks[chunk_id]
-                score = hit["_score"]
-                # ES的得分已经是标准化的相似度分数
-                search_results.append(SearchResult(
-                    chunk=chunk,
-                    score=float(score)
-                ))
-                
+            chunk = self._doc_to_chunk(hit["_source"])
+            score = hit["_score"] - 1.0  # 恢复原始余弦相似度
+            search_results.append(SearchResult(
+                chunk=chunk,
+                score=float(score)
+            ))
+            
         return search_results
-    
+        
     async def batch_search(
         self,
         query_vectors: List[List[float]],
@@ -332,15 +313,14 @@ class ElasticsearchVectorDB(VectorDB):
                     "script_score": {
                         "query": {"match_all": {}},
                         "script": {
-                            "source": "knn_score",
+                            "source": "cosineSimilarity(params.query_vector, 'vector') + 1.0",
                             "params": {
-                                "field": "vector",
-                                "query_value": vector.tolist(),
-                                "space_type": self.config.similarity
+                                "query_vector": vector.tolist()
                             }
                         }
                     }
-                }
+                },
+                "_source": ["chunk_id", "doc_id", "text", "metadata"]
             }
             
             # 添加过滤条件
@@ -365,83 +345,31 @@ class ElasticsearchVectorDB(VectorDB):
         for response_item in response["responses"]:
             query_results = []
             for hit in response_item["hits"]["hits"]:
-                chunk_id = hit["_source"]["chunk_id"]
-                if chunk_id in self._chunks:
-                    chunk = self._chunks[chunk_id]
-                    score = hit["_score"]
-                    query_results.append(SearchResult(
-                        chunk=chunk,
-                        score=float(score)
-                    ))
+                chunk = self._doc_to_chunk(hit["_source"])
+                score = hit["_score"] - 1.0  # 恢复原始余弦相似度
+                query_results.append(SearchResult(
+                    chunk=chunk,
+                    score=float(score)
+                ))
             batch_results.append(query_results)
             
         return batch_results
-    
+        
     async def save(self, path: str) -> None:
         """保存索引到文件
         
         Args:
             path: 保存路径
-            
-        Note:
-            Elasticsearch 是服务器端的数据库，索引数据由服务器管理。
-            这里只保存文档块映射等客户端状态。
         """
-        if not self._index_ready:
-            await self._log(LogLevel.WARNING, "索引尚未创建")
-            return
-            
-        await self._log(LogLevel.INFO, f"保存 Elasticsearch 客户端状态到: {path}")
+        # Elasticsearch 已经持久化数据，不需要额外保存
+        pass
         
-        # 创建目录
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        # 保存客户端状态
-        state = {
-            "index_name": self.config.index_name,
-            "chunks": {
-                chunk_id: chunk.model_dump()
-                for chunk_id, chunk in self._chunks.items()
-            }
-        }
-        
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            
-        await self._log(LogLevel.INFO, "客户端状态保存完成")
-    
     async def load(self, path: str) -> None:
         """从文件加载索引
         
         Args:
-            path: 状态文件路径
-            
-        Note:
-            Elasticsearch 是服务器端的数据库，这里只加载文档块映射等客户端状态。
-            索引数据需要在服务器端单独管理。
+            path: 索引文件路径
         """
-        await self._log(LogLevel.INFO, f"从文件加载 Elasticsearch 客户端状态: {path}")
-        
-        # 加载客户端状态
-        with open(path, "r", encoding="utf-8") as f:
-            state = json.load(f)
-            
         # 检查索引是否存在
-        if await self._client.indices.exists(index=state["index_name"]):
-            # 恢复文档块映射
-            self._chunks = {
-                chunk_id: Chunk.parse_obj(chunk_data)
-                for chunk_id, chunk_data in state["chunks"].items()
-            }
-            
-            self._index_ready = True
-            await self._log(LogLevel.INFO, "客户端状态加载完成")
-        else:
-            await self._log(
-                LogLevel.ERROR,
-                f"索引 {state['index_name']} 不存在，请先在服务器端恢复索引"
-            )
-            
-    async def close(self) -> None:
-        """关闭数据库连接"""
-        await self._client.close() 
+        if await self._client.indices.exists(index=self.config.index_name):
+            self._index_ready = True 

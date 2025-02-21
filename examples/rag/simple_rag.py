@@ -3,24 +3,19 @@
 """
 import asyncio
 import os
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Type
-
 from base.core.logging import AsyncLogger, ConsoleLogHandler, LogLevel
-from base.model.interface import LargeModel, ModelConfig, ModelResponse
 from base.rag.chunking import ChunkerConfig
 from base.rag.document import (Document, DocumentType, DocumentParserRegistry)
-from base.model.embedding import DenseEmbeddingModel, EmbeddingConfig, EmbeddingOutput
-from base.rag.generator import GeneratorConfig, GeneratorInput, RAGGenerator
-from base.rag.retriever import RetrieverConfig, VectorRetriever, SearchResult
-from base.rag.vectordb import VectorDBConfig
+from base.rag.generator import GeneratorInput
+from module.generators.rag import RAGGenerator, RAGGeneratorConfig
 from module.parsers import (ExcelParser, MarkdownParser, PDFParser, TextParser,
                         WordParser)
 from module.chunkers import SentenceChunker
 from module.models.embedding import GTEQwenEmbedding
 from module.models.llm.custom import CustomLLM, CustomLLMConfig
 from module.vectordbs.chroma import ChromaVectorDB, ChromaVectorDBConfig
+from module.prompts.rag import DEFAULT_RAG_TEMPLATE
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -162,15 +157,14 @@ async def main():
     )
     
     generator = RAGGenerator(
-        config=GeneratorConfig(
+        config=RAGGeneratorConfig(
             max_input_tokens=4096,
             max_output_tokens=1024,
-            prompt_template=(
-                "请根据以下背景信息回答问题。如果无法从背景信息中得到答案，请明确说明。\n\n"
-                "背景信息：\n{context}\n\n"
-                "问题：{query}\n\n"
-                "回答："
-            )
+            temperature=0.7,
+            top_p=0.9,
+            prompt_template=DEFAULT_RAG_TEMPLATE["prompt_template"],
+            context_format=DEFAULT_RAG_TEMPLATE["context_format"],
+            context_separator=DEFAULT_RAG_TEMPLATE["context_separator"]
         ),
         model=large_model
     )

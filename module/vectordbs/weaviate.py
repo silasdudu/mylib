@@ -10,7 +10,7 @@ import weaviate
 from weaviate.util import generate_uuid5
 
 from base.rag.vectordb import VectorDB, VectorDBConfig, SearchResult
-from base.rag.chunking import Chunk
+from base.rag.chunking import Chunk, ChunkMetadata
 from base.core.logging import LogLevel
 
 
@@ -38,90 +38,83 @@ class WeaviateVectorDBConfig(VectorDBConfig):
 class WeaviateVectorDB(VectorDB):
     """基于 Weaviate 的向量数据库实现"""
     
-    def __init__(self, config: WeaviateVectorDBConfig, **kwargs):
+    def __init__(self, config: WeaviateVectorDBConfig, logger: Optional[AsyncLogger] = None):
         """初始化 Weaviate 向量数据库
         
         Args:
             config: 数据库配置
-            **kwargs: 额外的参数，传递给父类
+            logger: 可选的日志记录器
         """
-        super().__init__(config, **kwargs)
+        super().__init__(config, logger)
         self.config: WeaviateVectorDBConfig = config
         
-        # 创建客户端
-        auth_config = weaviate.auth.AuthApiKey(api_key=self.config.api_key) if self.config.api_key else None
+        # 初始化 Weaviate 客户端
+        auth_config = weaviate.auth.AuthApiKey(api_key=config.api_key) if config.api_key else None
         self._client = weaviate.Client(
-            url=self.config.url,
+            url=config.url,
             auth_client_secret=auth_config,
-            additional_headers={
-                "X-OpenAI-Api-Key": self.config.api_key
-            } if self.config.api_key else None
+            additional_headers={"X-OpenAI-Api-Key": config.api_key} if config.api_key else None
         )
         
-        self._chunks = {}
-    
-    def _create_class_schema(self) -> Dict[str, Any]:
-        """创建类模式
+        # 创建类
+        self._create_class()
         
-        Returns:
-            类模式定义
-        """
-        return {
-            "class": self.config.class_name,
-            "description": "Document chunk for vector search",
-            "vectorizer": "none",  # 我们会手动提供向量
-            "vectorIndexType": self.config.vector_index_type,
-            "vectorIndexConfig": self.config.vector_index_config,
-            "properties": [
-                {
-                    "name": "chunk_id",
-                    "dataType": ["string"],
-                    "description": "Unique identifier of the chunk",
-                    "indexInverted": True
-                },
-                {
-                    "name": "doc_id",
-                    "dataType": ["string"],
-                    "description": "Document identifier",
-                    "indexInverted": True
-                },
-                {
-                    "name": "text",
-                    "dataType": ["text"],
-                    "description": "Chunk text content",
-                    "indexInverted": True
-                },
-                {
-                    "name": "metadata",
-                    "dataType": ["object"],
-                    "description": "Additional metadata",
-                    "indexInverted": True
-                }
-            ]
-        }
-    
-    def _prepare_object(
-        self,
-        chunk: Chunk,
-        vector: List[float]
-    ) -> Dict[str, Any]:
-        """准备要存储的对象
+    def _create_class(self) -> None:
+        """创建 Weaviate 类"""
+        # 检查类是否存在
+        if not self._client.schema.exists(self.config.class_name):
+            # 创建类
+            class_obj = {
+                "class": self.config.class_name,
+                "description": "Document chunk for vector search",
+                "vectorizer": "none",  # 我们自己提供向量
+                "vectorIndexType": self.config.vector_index_type,
+                "vectorIndexConfig": self.config.vector_index_config,
+                "properties": [
+                    {
+                        "name": "chunk_id",
+                        "dataType": ["string"],
+                        "description": "Unique identifier of the chunk"
+                    },
+                    {
+                        "name": "doc_id",
+                        "dataType": ["string"],
+                        "description": "Document identifier"
+                    },
+                    {
+                        "name": "text",
+                        "dataType": ["text"],
+                        "description": "Chunk text content"
+                    },
+                    {
+                        "name": "metadata",
+                        "dataType": ["object"],
+                        "description": "Chunk metadata"
+                    }
+                ]
+            }
+            self._client.schema.create_class(class_obj)
+            
+    def _object_to_chunk(self, obj: Dict[str, Any]) -> Chunk:
+        """从 Weaviate 对象构建 Chunk 对象
         
         Args:
-            chunk: 文档块
-            vector: 向量
+            obj: Weaviate 对象
             
         Returns:
-            Weaviate对象
+            Chunk 对象
         """
-        return {
-            "chunk_id": chunk.metadata.chunk_id,
-            "doc_id": chunk.metadata.doc_id,
-            "text": chunk.text,
-            "metadata": chunk.metadata.model_dump(),
-            "vector": vector
-        }
-    
+        metadata = obj.get("metadata", {})
+        chunk_metadata = ChunkMetadata(
+            chunk_id=obj["chunk_id"],
+            doc_id=obj.get("doc_id", ""),
+            start_char=metadata.get("start_char", 0),
+            end_char=metadata.get("end_char", len(obj["text"])),
+            text_len=len(obj["text"]),
+            extra=metadata
+        )
+        return Chunk(text=obj["text"], metadata=chunk_metadata)
+        
     async def create_index(self, vectors: List[List[float]], chunks: List[Chunk]) -> None:
         """创建向量索引
         
@@ -129,44 +122,41 @@ class WeaviateVectorDB(VectorDB):
             vectors: 向量列表
             chunks: 对应的文档块列表
         """
-        await self._log(LogLevel.INFO, f"创建 Weaviate 索引，向量数量: {len(vectors)}")
+        await self._log(LogLevel.INFO, f"创建索引，向量数量: {len(vectors)}")
         
         # 验证向量格式
         vectors_array = self._validate_vectors(vectors)
         
-        # 如果类已存在，先删除
-        if self._client.schema.exists(self.config.class_name):
-            self._client.schema.delete_class(self.config.class_name)
-            
-        # 创建类模式
-        class_schema = self._create_class_schema()
-        self._client.schema.create_class(class_schema)
-        
-        # 准备批量导入的数据
+        # 准备批量导入数据
         with self._client.batch(
             batch_size=self.config.batch_size,
             dynamic=self.config.dynamic_schema
         ) as batch:
-            for chunk, vector in zip(chunks, vectors_array):
-                # 生成UUID
-                uuid_str = generate_uuid5(chunk.metadata.chunk_id)
-                
-                # 准备对象
-                data_object = self._prepare_object(chunk, vector.tolist())
+            for vector, chunk in zip(vectors_array, chunks):
+                # 准备对象数据
+                data_object = {
+                    "chunk_id": chunk.metadata.chunk_id,
+                    "doc_id": chunk.metadata.doc_id,
+                    "text": chunk.text,
+                    "metadata": {
+                        "start_char": chunk.metadata.start_char,
+                        "end_char": chunk.metadata.end_char,
+                        "text_len": chunk.metadata.text_len,
+                        **(chunk.metadata.extra or {})
+                    }
+                }
                 
                 # 添加到批处理
                 batch.add_data_object(
                     data_object=data_object,
                     class_name=self.config.class_name,
-                    uuid=uuid_str
+                    vector=vector.tolist(),
+                    uuid=generate_uuid5(chunk.metadata.chunk_id)
                 )
                 
-        # 存储文档块映射
-        self._chunks = {chunk.metadata.chunk_id: chunk for chunk in chunks}
-        
         self._index_ready = True
-        await self._log(LogLevel.INFO, "Weaviate 索引创建完成")
-    
+        await self._log(LogLevel.INFO, "索引创建完成")
+        
     async def add_vectors(self, vectors: List[List[float]], chunks: List[Chunk]) -> None:
         """添加向量到索引
         
@@ -174,71 +164,58 @@ class WeaviateVectorDB(VectorDB):
             vectors: 向量列表
             chunks: 对应的文档块列表
         """
-        if not self._index_ready:
-            await self.create_index(vectors, chunks)
-            return
-            
-        await self._log(LogLevel.INFO, f"添加向量到 Weaviate 索引，数量: {len(vectors)}")
+        await self._log(LogLevel.INFO, f"添加向量，数量: {len(vectors)}")
         
         # 验证向量格式
         vectors_array = self._validate_vectors(vectors)
         
-        # 批量添加数据
+        # 准备批量导入数据
         with self._client.batch(
             batch_size=self.config.batch_size,
             dynamic=self.config.dynamic_schema
         ) as batch:
-            for chunk, vector in zip(chunks, vectors_array):
-                # 生成UUID
-                uuid_str = generate_uuid5(chunk.metadata.chunk_id)
-                
-                # 准备对象
-                data_object = self._prepare_object(chunk, vector.tolist())
+            for vector, chunk in zip(vectors_array, chunks):
+                # 准备对象数据
+                data_object = {
+                    "chunk_id": chunk.metadata.chunk_id,
+                    "doc_id": chunk.metadata.doc_id,
+                    "text": chunk.text,
+                    "metadata": {
+                        "start_char": chunk.metadata.start_char,
+                        "end_char": chunk.metadata.end_char,
+                        "text_len": chunk.metadata.text_len,
+                        **(chunk.metadata.extra or {})
+                    }
+                }
                 
                 # 添加到批处理
                 batch.add_data_object(
                     data_object=data_object,
                     class_name=self.config.class_name,
-                    uuid=uuid_str
+                    vector=vector.tolist(),
+                    uuid=generate_uuid5(chunk.metadata.chunk_id)
                 )
                 
-        # 更新文档块映射
-        for chunk in chunks:
-            self._chunks[chunk.metadata.chunk_id] = chunk
-            
         await self._log(LogLevel.INFO, "向量添加完成")
-    
+        
     async def delete_vectors(self, chunk_ids: List[str]) -> None:
         """从索引中删除向量
         
         Args:
             chunk_ids: 要删除的文档块ID列表
         """
-        if not self._index_ready:
-            await self._log(LogLevel.WARNING, "索引尚未创建")
-            return
-            
         await self._log(LogLevel.INFO, f"删除向量，数量: {len(chunk_ids)}")
         
-        # 批量删除
+        # 批量删除对象
         with self._client.batch() as batch:
             for chunk_id in chunk_ids:
-                uuid_str = generate_uuid5(chunk_id)
                 batch.delete_objects(
                     class_name=self.config.class_name,
-                    where={
-                        "path": ["chunk_id"],
-                        "operator": "Equal",
-                        "valueString": chunk_id
-                    }
+                    where={"path": ["chunk_id"], "operator": "Equal", "valueString": chunk_id}
                 )
                 
-        # 更新文档块映射
-        for chunk_id in chunk_ids:
-            self._chunks.pop(chunk_id, None)
-            
         await self._log(LogLevel.INFO, "向量删除完成")
-    
+        
     async def search(
         self,
         query_vector: List[float],
@@ -309,17 +286,15 @@ class WeaviateVectorDB(VectorDB):
         search_results = []
         if results and "data" in results:
             for item in results["data"]["Get"][self.config.class_name]:
-                chunk_id = item["chunk_id"]
-                if chunk_id in self._chunks:
-                    chunk = self._chunks[chunk_id]
-                    certainty = item["_additional"]["certainty"]
-                    search_results.append(SearchResult(
-                        chunk=chunk,
-                        score=float(certainty)
-                    ))
+                chunk = self._object_to_chunk(item)
+                certainty = item["_additional"]["certainty"]
+                search_results.append(SearchResult(
+                    chunk=chunk,
+                    score=float(certainty)
+                ))
                     
         return search_results
-    
+        
     async def batch_search(
         self,
         query_vectors: List[List[float]],
@@ -354,68 +329,22 @@ class WeaviateVectorDB(VectorDB):
             batch_results.append(results)
             
         return batch_results
-    
+        
     async def save(self, path: str) -> None:
         """保存索引到文件
         
         Args:
             path: 保存路径
-            
-        Note:
-            Weaviate 是服务器端的数据库，索引数据由服务器管理。
-            这里只保存文档块映射等客户端状态。
         """
-        if not self._index_ready:
-            await self._log(LogLevel.WARNING, "索引尚未创建")
-            return
-            
-        await self._log(LogLevel.INFO, f"保存 Weaviate 客户端状态到: {path}")
+        # Weaviate 已经持久化数据，不需要额外保存
+        pass
         
-        # 创建目录
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        # 保存客户端状态
-        state = {
-            "class_name": self.config.class_name,
-            "chunks": {
-                chunk_id: chunk.model_dump()
-                for chunk_id, chunk in self._chunks.items()
-            }
-        }
-        
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            
-        await self._log(LogLevel.INFO, "客户端状态保存完成")
-    
     async def load(self, path: str) -> None:
         """从文件加载索引
         
         Args:
-            path: 状态文件路径
-            
-        Note:
-            Weaviate 是服务器端的数据库，这里只加载文档块映射等客户端状态。
-            索引数据需要在服务器端单独管理。
+            path: 索引文件路径
         """
-        await self._log(LogLevel.INFO, f"从文件加载 Weaviate 客户端状态: {path}")
-        
-        # 加载客户端状态
-        with open(path, "r", encoding="utf-8") as f:
-            state = json.load(f)
-            
         # 检查类是否存在
-        if self._client.schema.exists(state["class_name"]):
-            # 恢复文档块映射
-            self._chunks = {
-                chunk_id: Chunk.parse_obj(chunk_data)
-                for chunk_id, chunk_data in state["chunks"].items()
-            }
-            
-            self._index_ready = True
-            await self._log(LogLevel.INFO, "客户端状态加载完成")
-        else:
-            await self._log(
-                LogLevel.ERROR,
-                f"类 {state['class_name']} 不存在，请先创建类"
-            ) 
+        if self._client.schema.exists(self.config.class_name):
+            self._index_ready = True 

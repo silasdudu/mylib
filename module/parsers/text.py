@@ -7,8 +7,8 @@ from typing import List, Optional
 
 from base.core.logging import AsyncLogger, LogLevel
 from base.rag.document import (Document, DocumentMetadata, DocumentParser,
-                             DocumentType, TextDocument)
-
+                             DocumentType)
+from module.documents import TextDocument
 
 class TextParser(DocumentParser):
     """文本文件解析器，支持.txt文件的解析"""

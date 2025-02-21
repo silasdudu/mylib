@@ -7,9 +7,9 @@ from typing import List, Optional
 
 import fitz  # PyMuPDF
 from base.core.logging import LogLevel
-from base.rag.document import (Document, DocumentMetadata, DocumentType,
-                             TextDocument, DocumentParser)
+from base.rag.document import (Document, DocumentMetadata, DocumentType, DocumentParser)
 from base.core.logging import AsyncLogger
+from module.documents import TextDocument
 
 
 class PDFParser(DocumentParser):
@@ -54,7 +54,7 @@ class PDFParser(DocumentParser):
             pdf_document = fitz.open(file_path)
             
             # 提取文本内容
-            content = ""
+            content_parts = []
             images = []
             
             await self._log(LogLevel.INFO, f"开始处理PDF文件，共 {len(pdf_document)} 页")
@@ -63,9 +63,31 @@ class PDFParser(DocumentParser):
                 page = pdf_document[page_num]
                 # 获取页面文本并清理
                 page_text = page.get_text()
+                
                 # 清理空白字符
-                page_text = ' '.join(line.strip() for line in page_text.split('\n') if line.strip())
-                content += page_text + '\n\n'
+                cleaned_lines = []
+                prev_empty = False
+                for line in page_text.split('\n'):
+                    line = line.strip()
+                    if line:
+                        # 将连续的空格替换为单个空格
+                        line = ' '.join(word for word in line.split() if word)
+                        cleaned_lines.append(line)
+                        prev_empty = False
+                    elif not prev_empty:  # 最多保留一个空行
+                        cleaned_lines.append('')
+                        prev_empty = True
+                
+                # 如果最后一行是空行，移除它
+                if cleaned_lines and not cleaned_lines[-1]:
+                    cleaned_lines.pop()
+                
+                if cleaned_lines:  # 只有在页面有内容时才添加
+                    if content_parts:  # 不是第一页时添加页面分隔符
+                        content_parts.append('')
+                        content_parts.append(f"--- 第 {page_num + 1} 页 ---")
+                        content_parts.append('')
+                    content_parts.extend(cleaned_lines)
                 
                 # 如果需要提取图片
                 if self.extract_images:
@@ -82,6 +104,9 @@ class PDFParser(DocumentParser):
                                 'extension': base_image["ext"]
                             })
                     await self._log(LogLevel.DEBUG, f"第 {page_num + 1} 页发现 {len(image_list)} 张图片")
+            
+            # 合并所有内容
+            content = '\n'.join(content_parts)
             
             # 创建元数据
             metadata = DocumentMetadata(

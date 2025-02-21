@@ -193,4 +193,4 @@ class VectorDB(ABC):
     @property
     def is_ready(self) -> bool:
         """索引是否已准备就绪"""
-        return self._index_ready 
+        return self._index_ready

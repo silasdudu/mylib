@@ -12,12 +12,8 @@ from .retriever import SearchResult
 
 
 class GeneratorConfig(BaseModel):
-    """生成器配置"""
-    max_input_tokens: int = 4096
-    max_output_tokens: int = 1024
-    temperature: float = 0.7
-    top_p: float = 0.9
-    extra_params: Dict[str, Any] = {}
+    """生成器配置基类"""
+    extra_params: Dict[str, Any] = {}  # 额外的特定实现参数
 
 
 @dataclass
@@ -44,6 +40,12 @@ class Generator(ABC):
         config: GeneratorConfig,
         model: LargeModel
     ):
+        """初始化生成器
+        
+        Args:
+            config: 生成器配置
+            model: 大语言模型
+        """
         self.config = config
         self.model = model
     
@@ -52,7 +54,14 @@ class Generator(ABC):
         self,
         input_data: GeneratorInput
     ) -> GeneratorOutput:
-        """生成回答"""
+        """生成回答
+        
+        Args:
+            input_data: 生成器输入
+            
+        Returns:
+            生成器输出
+        """
         pass
     
     @abstractmethod
@@ -60,7 +69,14 @@ class Generator(ABC):
         self,
         input_data: GeneratorInput
     ) -> AsyncIterator[str]:
-        """流式生成回答"""
+        """流式生成回答
+        
+        Args:
+            input_data: 生成器输入
+            
+        Yields:
+            生成的文本片段
+        """
         pass
     
     @abstractmethod
@@ -69,86 +85,16 @@ class Generator(ABC):
         query: str,
         context: List[SearchResult]
     ) -> str:
-        """格式化提示词"""
+        """格式化提示词
+        
+        Args:
+            query: 查询文本
+            context: 检索结果列表
+            
+        Returns:
+            格式化后的提示词
+        """
         pass
-
-
-class RAGGenerator(Generator):
-    """RAG生成器"""
-    
-    async def generate(
-        self,
-        input_data: GeneratorInput
-    ) -> GeneratorOutput:
-        """生成回答"""
-        # 格式化提示词
-        prompt = self.format_prompt(
-            input_data.query,
-            input_data.context
-        )
-        
-        # 调用模型生成
-        model_config = ModelConfig(
-            model_name=self.model.__class__.__name__,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_output_tokens
-        )
-        
-        response = await self.model.generate(prompt, model_config)
-        
-        return GeneratorOutput(
-            response=response.text,
-            context=input_data.context,
-            metadata={
-                "tokens_used": response.tokens_used,
-                "finish_reason": response.finish_reason
-            }
-        )
-    
-    async def generate_stream(
-        self,
-        input_data: GeneratorInput
-    ) -> AsyncIterator[str]:
-        """流式生成回答"""
-        # 格式化提示词
-        prompt = self.format_prompt(
-            input_data.query,
-            input_data.context
-        )
-        
-        # 调用模型流式生成
-        model_config = ModelConfig(
-            model_name=self.model.__class__.__name__,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_output_tokens
-        )
-        
-        async for token in self.model.generate_stream(prompt, model_config):
-            yield token
-    
-    def format_prompt(
-        self,
-        query: str,
-        context: List[SearchResult]
-    ) -> str:
-        """格式化RAG提示词"""
-        # 将上下文组织成文本
-        context_text = "\n\n".join([
-            f"[{i+1}] {result.chunk.text}"
-            for i, result in enumerate(context)
-        ])
-        
-        # 构建提示词模板
-        prompt = f"""基于以下上下文回答问题。如果上下文中没有相关信息，请说明无法回答。
-
-上下文：
-{context_text}
-
-问题：{query}
-
-回答："""
-        
-        return prompt
 
 
 class GeneratorRegistry:
@@ -162,16 +108,32 @@ class GeneratorRegistry:
         name: str,
         generator: Generator
     ) -> None:
-        """注册生成器"""
+        """注册生成器
+        
+        Args:
+            name: 生成器名称
+            generator: 生成器实例
+        """
         self._generators[name] = generator
         
     def get_generator(
         self,
         name: str
     ) -> Optional[Generator]:
-        """获取生成器"""
+        """获取生成器
+        
+        Args:
+            name: 生成器名称
+            
+        Returns:
+            生成器实例,如果不存在则返回None
+        """
         return self._generators.get(name)
         
     def list_generators(self) -> List[str]:
-        """列出所有生成器"""
+        """列出所有生成器
+        
+        Returns:
+            生成器名称列表
+        """
         return list(self._generators.keys()) 

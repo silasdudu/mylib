@@ -1,7 +1,7 @@
 """
-向量检索器实现，基于向量相似度搜索
+向量检索器实现
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import numpy as np
 from base.rag.retriever import Retriever, RetrieverConfig, SearchResult
 from base.rag.chunking import Chunk

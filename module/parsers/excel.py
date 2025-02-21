@@ -8,7 +8,8 @@ from typing import List, Optional
 import pandas as pd
 from base.core.logging import AsyncLogger, LogLevel
 from base.rag.document import (Document, DocumentMetadata, DocumentParser,
-                             DocumentType, TextDocument)
+                             DocumentType)
+from module.documents import TextDocument
 
 
 class ExcelParser(DocumentParser):
@@ -70,7 +71,23 @@ class ExcelParser(DocumentParser):
                 # 包含列名作为表头
                 df_string = df.to_string(index=False)
                 # 清理空白行和多余空白
-                cleaned_lines = [line.strip() for line in df_string.split('\n') if line.strip()]
+                cleaned_lines = []
+                prev_empty = False
+                for line in df_string.split('\n'):
+                    line = line.strip()
+                    if line:
+                        # 将连续的空格替换为单个空格
+                        line = ' '.join(word for word in line.split() if word)
+                        cleaned_lines.append(line)
+                        prev_empty = False
+                    elif not prev_empty:  # 最多保留一个空行
+                        cleaned_lines.append('')
+                        prev_empty = True
+                
+                # 如果最后一行是空行，移除它
+                if cleaned_lines and not cleaned_lines[-1]:
+                    cleaned_lines.pop()
+                
                 content_parts.append('\n'.join(cleaned_lines))
                 
                 # 统计信息

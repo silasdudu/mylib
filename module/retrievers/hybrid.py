@@ -1,5 +1,5 @@
 """
-混合检索器实现，结合多种检索策略的优点
+混合检索器实现
 """
 from typing import List, Optional, Dict, Any, Union, Tuple
 import numpy as np

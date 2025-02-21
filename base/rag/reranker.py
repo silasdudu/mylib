@@ -10,10 +10,8 @@ from .retriever import SearchResult
 
 
 class RerankerConfig(BaseModel):
-    """重排序配置"""
-    score_threshold: float = 0.0
-    max_results: int = 10
-    extra_params: Dict[str, Any] = {}
+    """重排序器配置基类"""
+    extra_params: Dict[str, Any] = {}  # 额外的特定实现参数
 
 
 class Reranker(ABC):

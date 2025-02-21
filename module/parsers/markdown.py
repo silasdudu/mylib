@@ -9,7 +9,8 @@ import markdown
 from bs4 import BeautifulSoup
 from base.core.logging import AsyncLogger, LogLevel
 from base.rag.document import (Document, DocumentMetadata, DocumentParser,
-                             DocumentType, TextDocument)
+                             DocumentType)
+from module.documents import TextDocument
 
 
 class MarkdownParser(DocumentParser):

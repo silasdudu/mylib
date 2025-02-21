@@ -9,7 +9,8 @@ import docx
 from base.core.logging import LogLevel
 from base.core.logging import AsyncLogger
 from base.rag.document import (Document, DocumentMetadata, DocumentParser,
-                             DocumentType, TextDocument)
+                             DocumentType)
+from module.documents import TextDocument
 
 
 class WordParser(DocumentParser):
@@ -59,13 +60,21 @@ class WordParser(DocumentParser):
             for i, paragraph in enumerate(doc.paragraphs, 1):
                 text = paragraph.text.strip()
                 if text:  # 只添加非空段落
-                    content.append(text)
+                    # 如果当前段落是标题样式，添加额外的换行
+                    if paragraph.style.name.startswith('Heading'):
+                        if content:  # 不是第一个段落时添加额外换行
+                            content.append('')
+                        content.append(text)
+                        content.append('')
+                    else:
+                        content.append(text)
                     await self._log(LogLevel.DEBUG, f"处理第 {i} 个段落")
             
             # 提取表格文本
             await self._log(LogLevel.DEBUG, f"开始处理表格，共 {len(doc.tables)} 个表格")
             for i, table in enumerate(doc.tables, 1):
                 await self._log(LogLevel.DEBUG, f"处理第 {i} 个表格")
+                table_content = []
                 for row in table.rows:
                     row_text = []
                     for cell in row.cells:
@@ -73,11 +82,26 @@ class WordParser(DocumentParser):
                         if cell_text:  # 只添加非空单元格
                             row_text.append(cell_text)
                     if row_text:  # 只添加非空行
-                        content.append(" | ".join(row_text))
+                        table_content.append(" | ".join(row_text))
+                if table_content:  # 如果表格有内容，添加到文档
+                    if content:  # 不是第一个内容时添加空行
+                        content.append('')
+                    content.extend(table_content)
+                    content.append('')
             
-            # 合并所有文本，使用双换行符分隔
-            # 确保每个段落前后没有多余的空白字符
-            full_content = '\n\n'.join(content)
+            # 合并所有文本，使用单个换行符分隔
+            # 移除连续的空行，最多保留一个
+            cleaned_content = []
+            prev_empty = False
+            for line in content:
+                if line.strip():
+                    cleaned_content.append(line)
+                    prev_empty = False
+                elif not prev_empty:
+                    cleaned_content.append(line)
+                    prev_empty = True
+            
+            full_content = '\n'.join(cleaned_content)
             
             # 创建元数据
             metadata = DocumentMetadata(
