@@ -8,6 +8,7 @@ import numpy as np
 import chromadb
 from chromadb.config import Settings
 from chromadb.api.models.Collection import Collection
+from chromadb.errors import InvalidCollectionException
 
 from base.rag.vectordb import VectorDB, VectorDBConfig, SearchResult
 from base.rag.chunking import Chunk, ChunkMetadata
@@ -51,7 +52,8 @@ class ChromaVectorDB(VectorDB):
                 name=self.config.collection_name,
                 embedding_function=None  # 我们自己处理向量生成
             )
-        except ValueError:
+        except InvalidCollectionException:
+            # 如果collection不存在，就创建一个新的
             return self._client.create_collection(
                 name=self.config.collection_name,
                 embedding_function=None,

@@ -106,8 +106,8 @@ class CustomLLM(LargeModel):
             self.model.eval()
     
     async def _ensure_session(self):
-        """确保 aiohttp session 已初始化"""
-        if self.use_api and self.session is None:
+        """确保 session 已创建"""
+        if self.session is None:
             self.session = aiohttp.ClientSession()
     
     async def _cleanup(self):
@@ -130,9 +130,9 @@ class CustomLLM(LargeModel):
         Returns:
             生成的文本响应
         """
-        await self._ensure_session()
-        
         try:
+            await self._ensure_session()
+            
             async with self.session.post(
                 self.config.api_url,
                 headers=self.headers,
@@ -142,8 +142,8 @@ class CustomLLM(LargeModel):
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": config.temperature if config else self.config.temperature,
-                    "max_tokens": config.max_tokens if config else self.config.max_tokens,
-                    "stop": config.stop_sequences if config else self.config.stop_sequences
+                    # "max_tokens": config.max_tokens if config else self.config.max_tokens,
+                    # "stop": config.stop_sequences if config else self.config.stop_sequences
                 }
             ) as response:
                 if response.status != 200:
@@ -227,26 +227,30 @@ class CustomLLM(LargeModel):
         else:
             return await self._generate_local(prompt, config)
     
+    async def close(self):
+        """关闭资源"""
+        await self._cleanup()
+    
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口"""
+        await self.close()
+    
     async def generate_stream(
         self,
         prompt: str,
         config: Optional[ModelConfig] = None
     ) -> AsyncIterator[str]:
-        """流式生成文本
-        
-        Args:
-            prompt: 输入提示词
-            config: 可选的模型配置
-            
-        Yields:
-            生成的文本片段
-        """
+        """流式生成文本"""
         if self.use_api:
-            await self._ensure_session()
-            
             try:
+                await self._ensure_session()
+                
                 async with self.session.post(
-                    f"{self.config.api_url}",  # 假设API支持流式接口
+                    f"{self.config.api_url}",
                     headers=self.headers,
                     json={
                         "model": self.config.model_name,
@@ -254,8 +258,8 @@ class CustomLLM(LargeModel):
                             {"role": "user", "content": prompt}
                         ],
                         "temperature": config.temperature if config else self.config.temperature,
-                        "max_tokens": config.max_tokens if config else self.config.max_tokens,
-                        "stop": config.stop_sequences if config else self.config.stop_sequences,
+                        # "max_tokens": config.max_tokens if config else self.config.max_tokens,
+                        # "stop": config.stop_sequences if config else self.config.stop_sequences,
                         "stream": True
                     }
                 ) as response:
@@ -277,7 +281,6 @@ class CustomLLM(LargeModel):
                 raise RuntimeError(f"API 流式调用出错: {str(e)}")
         else:
             # 本地模型流式生成
-            # 注意：这里简化处理，实际上可以实现更细粒度的流式生成
             response = await self.generate(prompt, config)
             yield response.text
     
@@ -296,13 +299,4 @@ class CustomLLM(LargeModel):
         Raises:
             NotImplementedError: 该方法需要在专门的嵌入模型中实现
         """
-        raise NotImplementedError("请使用专门的嵌入模型来生成文本嵌入")
-    
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        await self._ensure_session()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self._cleanup() 
+        raise NotImplementedError("请使用专门的嵌入模型来生成文本嵌入") 

@@ -29,8 +29,13 @@ class Chunk:
 
 
 class ChunkerConfig(BaseModel):
-    """分块器配置基类"""
-    extra_params: Dict[str, Any] = {}  # 额外的特定实现参数
+    """分块器配置"""
+    chunk_size: int  # 每个块的最大字符数
+    chunk_overlap: int  # 块之间的重叠字符数
+    
+    model_config = {
+        'protected_namespaces': ()  # 禁用 Pydantic 的保护命名空间检查
+    }
 
 
 class Chunker(ABC):

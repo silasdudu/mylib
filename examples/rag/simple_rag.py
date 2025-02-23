@@ -22,17 +22,17 @@ from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(env_path)
 
-# 获取通义千问配置
-api_key = os.getenv('QWEN_72B_API_KEY')
-base_url = os.getenv('QWEN_72B_BASE_URL')
-model_name = os.getenv('QWEN_72B_MODEL_NAME')
+# 获取minimax配置
+api_key = os.getenv('minimax_api_key')
+base_url = os.getenv('minimax_base_url')
+model_name = os.getenv('minimax_model_name')
 
 if not all([api_key, base_url, model_name]):
     raise ValueError(
         "必需的环境变量未设置。请在 .env 文件中设置以下变量：\n"
-        "- QWEN_72B_API_KEY\n"
-        "- QWEN_72B_BASE_URL\n"
-        "- QWEN_72B_MODEL_NAME"
+        "- minimax_api_key\n"
+        "- minimax_base_url\n"
+        "- minimax_model_name"
     )
 
 
@@ -214,31 +214,41 @@ async def main():
     else:
         await logger.log(LogLevel.INFO, "使用现有数据库，跳过索引构建")
     
-    # 处理用户查询
-    while True:
-        query = input("\n请输入问题（输入'q'退出）: ").strip()
-        if query.lower() == 'q':
-            break
+    try:
+        # 处理用户查询
+        while True:
+            query = input("\n请输入问题（输入'q'退出）: ").strip()
+            if query.lower() == 'q':
+                break
             
-        # 生成查询向量
-        query_embedding = await embedding_model.embed(query)
-        
-        # 检索相关文档
-        results = await vector_db.search(query_embedding.vector)
-        await logger.log(LogLevel.INFO, f"找到 {len(results)} 个相关文档块")
-        
-        # 生成回答
-        generator_input = GeneratorInput(
-            query=query,
-            context=results
-        )
-        
-        # 流式输出回答
-        print("\n回答：", end="", flush=True)
-        async for token in generator.generate_stream(generator_input):
-            print(token, end="", flush=True)
-        print("\n")
+            # 生成查询向量
+            query_embedding = await embedding_model.embed(query)
+            
+            # 检索相关文档
+            results = await vector_db.search(query_embedding.vector)
+            await logger.log(LogLevel.INFO, f"找到 {len(results)} 个相关文档块")
+            
+            # 生成回答
+            generator_input = GeneratorInput(
+                query=query,
+                context=results
+            )
+            
+            # 流式输出回答
+            print("\n回答：", end="", flush=True)
+            async for token in generator.generate_stream(generator_input):
+                print(token, end="", flush=True)
+            print("\n")
+    finally:
+        # 确保资源被正确关闭
+        await large_model.close()
+        await logger.log(LogLevel.INFO, "程序正常退出")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+    except Exception as e:
+        print(f"\n发生错误: {e}")

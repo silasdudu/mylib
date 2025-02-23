@@ -167,7 +167,7 @@ class GTEQwenEmbedding(DenseEmbeddingModel):
                     for vector in result["embeddings"]:
                         if self.config.normalize:
                             vector = self.normalize_vector(vector)
-                    embeddings.append(EmbeddingOutput(vector=vector))
+                        embeddings.append(EmbeddingOutput(vector=vector))
                 elif "data" in result:
                     for _, kv in enumerate(result["data"]):
                         if self.config.normalize:
