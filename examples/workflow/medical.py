@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
-from ...base.dialogue.memory import Message
-from ...base.rag.retriever import SearchResult
-from ...base.search.engine import SearchResult as WebSearchResult
+from base.dialogue.memory import Message
+from base.rag.retriever import SearchResult
+from base.search.engine import SearchResult as WebSearchResult
 
 
 class QuestionType(str, Enum):

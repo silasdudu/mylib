@@ -35,31 +35,73 @@ class ChromaVectorDB(VectorDB):
         """
         super().__init__(config, logger)
         self.config: ChromaVectorDBConfig = config
+        self._index_ready = False
         
-        # 初始化 ChromaDB 客户端
-        self._client = chromadb.Client(Settings(
-            persist_directory=config.persist_directory,
-            anonymized_telemetry=False
-        ))
+        # 确保持久化目录存在
+        persist_dir = os.path.abspath(config.persist_directory)
+        os.makedirs(persist_dir, exist_ok=True)
         
-        # 获取或创建集合
-        self._collection = self._get_or_create_collection()
+        # 使用 PersistentClient 初始化
+        try:
+            self._client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
+            # 获取或创建集合
+            self._collection = self._get_or_create_collection()
+            
+            # 检查集合是否存在并且有数据
+            collection_count = self._collection.count()
+            if collection_count > 0:
+                self._index_ready = True
+                self._log_sync(LogLevel.INFO, f"成功加载集合 {self.config.collection_name}，包含 {collection_count} 条记录")
+            else:
+                self._log_sync(LogLevel.INFO, f"集合 {self.config.collection_name} 存在但为空")
+        except Exception as e:
+            self._log_sync(LogLevel.ERROR, f"初始化ChromaDB时出错: {str(e)}")
+            raise
         
+    def _log_sync(self, level: LogLevel, message: str) -> None:
+        """同步日志记录（用于构造函数中）"""
+        if self.logger:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.logger.log(level, message))
+            except RuntimeError:
+                pass
+            
     def _get_or_create_collection(self) -> Collection:
         """获取或创建集合"""
         try:
-            return self._client.get_collection(
-                name=self.config.collection_name,
-                embedding_function=None  # 我们自己处理向量生成
-            )
-        except InvalidCollectionException:
-            # 如果collection不存在，就创建一个新的
-            return self._client.create_collection(
-                name=self.config.collection_name,
-                embedding_function=None,
-                metadata={"dimension": self.config.dimension}
-            )
+            # 先尝试获取现有集合
+            try:
+                collection = self._client.get_or_create_collection(
+                    name=self.config.collection_name,
+                    embedding_function=None  # 我们自己处理向量生成
+                )
+                self._log_sync(LogLevel.INFO, f"成功获取集合: {self.config.collection_name}")
+                return collection
+            except InvalidCollectionException:
+                # 如果collection不存在，就创建一个新的
+                collection = self._client.create_collection(
+                    name=self.config.collection_name,
+                    embedding_function=None,
+                    metadata={"dimension": self.config.dimension}
+                )
+                self._log_sync(LogLevel.INFO, f"成功创建集合: {self.config.collection_name}")
+                return collection
+        except Exception as e:
+            self._log_sync(LogLevel.ERROR, f"获取或创建集合时出错: {str(e)}")
+            raise
             
+    @property
+    def is_ready(self) -> bool:
+        """检查索引是否已准备好"""
+        return self._index_ready
+        
     def _metadata_to_chunk(self, chunk_id: str, text: str, metadata: Dict[str, Any]) -> Chunk:
         """从元数据构建 Chunk 对象
         
@@ -99,8 +141,14 @@ class ChromaVectorDB(VectorDB):
         
         # 添加额外的元数据字段
         if chunk.metadata.extra:
+            # 确保 role 和 timestamp 字段被保存
+            for key in ["role", "timestamp"]:
+                if key in chunk.metadata.extra:
+                    metadata[key] = chunk.metadata.extra[key]
+            
+            # 添加其他配置中指定的元数据字段
             for field in self.config.metadata_fields:
-                if field in chunk.metadata.extra:
+                if field in chunk.metadata.extra and field not in ["role", "timestamp"]:
                     metadata[field] = chunk.metadata.extra[field]
                     
         return metadata
@@ -132,6 +180,65 @@ class ChromaVectorDB(VectorDB):
         
         self._index_ready = True
         await self._log(LogLevel.INFO, "索引创建完成")
+    
+    async def clear(self) -> None:
+        """清空集合"""
+        if self._collection:
+            await self._log(LogLevel.INFO, f"清空集合 {self.config.collection_name}")
+            self._client.delete_collection(self.config.collection_name)
+            self._collection = self._get_or_create_collection()
+            self._index_ready = False
+            await self._log(LogLevel.INFO, "集合已清空")
+    
+    async def persist(self) -> None:
+        """持久化集合"""
+        if self._client:
+            await self._log(LogLevel.INFO, "持久化集合")
+            self._client.persist()
+            await self._log(LogLevel.INFO, "持久化完成")
+        
+    async def add_documents(self, chunks: List[Chunk], embedding_model: Any) -> None:
+        """添加文档到向量数据库
+        
+        Args:
+            chunks: 文档块列表
+            embedding_model: 嵌入模型
+        """
+        if not chunks:
+            await self._log(LogLevel.WARNING, "没有文档块可添加")
+            return
+            
+        await self._log(LogLevel.INFO, f"添加 {len(chunks)} 个文档块到向量数据库")
+        
+        # 生成嵌入向量
+        embeddings = await embedding_model.embed_chunks(chunks)
+        vectors = [e.vector for e in embeddings]
+        
+        # 添加到向量数据库
+        await self.add_vectors(vectors, chunks)
+        
+        # 设置索引已准备好
+        self._index_ready = True
+        
+    async def similarity_search(self, query: str, embedding_model: Any, top_k: Optional[int] = None) -> List[Chunk]:
+        """基于查询文本进行相似度搜索
+        
+        Args:
+            query: 查询文本
+            embedding_model: 嵌入模型
+            top_k: 返回结果数量
+            
+        Returns:
+            相似的文档块列表
+        """
+        # 生成查询向量
+        query_embedding = await embedding_model.embed(query)
+        
+        # 执行向量搜索
+        results = await self.search(query_embedding.vector, top_k)
+        
+        # 返回文档块
+        return [result.chunk for result in results]
         
     async def add_vectors(self, vectors: List[List[float]], chunks: List[Chunk]) -> None:
         """添加向量到索引
@@ -187,7 +294,7 @@ class ChromaVectorDB(VectorDB):
             搜索结果列表
         """
         if not self._index_ready:
-            await self._log(LogLevel.WARNING, "索引尚未创建")
+            await self._log(LogLevel.WARNING, "索引尚未创建，无法执行搜索")
             return []
             
         # 验证查询向量
@@ -197,38 +304,41 @@ class ChromaVectorDB(VectorDB):
         k = top_k or self.config.top_k
         await self._log(LogLevel.INFO, f"执行搜索，top_k={k}")
         
-        results = self._collection.query(
-            query_embeddings=query_array.tolist(),
-            n_results=k,
-            where=filter_params
-        )
-        
-        await self._log(LogLevel.INFO, f"搜索结果: {results}")
-        
-        # 构建结果
-        search_results = []
-        if results["ids"]:
-            for i, (chunk_id, distance) in enumerate(zip(results["ids"][0], results["distances"][0])):
-                # 从ChromaDB结果直接构建Chunk对象
-                chunk = self._metadata_to_chunk(
-                    chunk_id=chunk_id,
-                    text=results["documents"][0][i],
-                    metadata=results["metadatas"][0][i]
-                )
-                
-                # 计算相似度分数
-                if self.config.distance_metric == "cosine":
-                    score = 1 - distance
-                else:  # l2 或 ip
-                    score = 1 / (1 + distance)
-                
-                search_results.append(SearchResult(
-                    chunk=chunk,
-                    score=float(score)
-                ))
+        try:
+            results = self._collection.query(
+                query_embeddings=query_array.tolist(),
+                n_results=k,
+                where=filter_params
+            )
+            
+            # 构建结果
+            search_results = []
+            if results["ids"] and len(results["ids"]) > 0 and len(results["ids"][0]) > 0:
+                for i, (chunk_id, distance) in enumerate(zip(results["ids"][0], results["distances"][0])):
+                    # 从ChromaDB结果直接构建Chunk对象
+                    chunk = self._metadata_to_chunk(
+                        chunk_id=chunk_id,
+                        text=results["documents"][0][i],
+                        metadata=results["metadatas"][0][i]
+                    )
                     
-        await self._log(LogLevel.INFO, f"构建了 {len(search_results)} 个搜索结果")
-        return search_results
+                    # 计算相似度分数
+                    if self.config.distance_metric == "cosine":
+                        score = 1 - distance
+                    else:  # l2 或 ip
+                        score = 1 / (1 + distance)
+                    
+                    search_results.append(SearchResult(
+                        chunk=chunk,
+                        score=float(score)
+                    ))
+            
+            await self._log(LogLevel.INFO, f"构建了 {len(search_results)} 个搜索结果")
+            return search_results
+            
+        except Exception as e:
+            await self._log(LogLevel.ERROR, f"搜索过程中出错: {str(e)}")
+            return []
         
     async def batch_search(
         self,

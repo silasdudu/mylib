@@ -28,6 +28,14 @@ class RAGGeneratorConfig(GeneratorConfig):
         default=DEFAULT_RAG_TEMPLATE["context_separator"],
         description="上下文分隔符"
     )
+    history_format: str = Field(
+        default="{role}: {content}",
+        description="对话历史格式化模板"
+    )
+    history_separator: str = Field(
+        default="\n",
+        description="对话历史分隔符"
+    )
 
 
 class RAGGenerator(Generator):
@@ -62,7 +70,8 @@ class RAGGenerator(Generator):
         # 格式化提示词
         prompt = self.format_prompt(
             input_data.query,
-            input_data.context
+            input_data.context,
+            input_data.conversation_history
         )
         
         # 调用模型生成
@@ -99,7 +108,8 @@ class RAGGenerator(Generator):
         # 格式化提示词
         prompt = self.format_prompt(
             input_data.query,
-            input_data.context
+            input_data.context,
+            input_data.conversation_history
         )
         
         # 调用模型流式生成
@@ -115,13 +125,15 @@ class RAGGenerator(Generator):
     def format_prompt(
         self,
         query: str,
-        context: List[SearchResult]
+        context: List[SearchResult],
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """格式化提示词
         
         Args:
             query: 查询文本
             context: 检索结果列表
+            conversation_history: 对话历史
             
         Returns:
             格式化后的提示词
@@ -129,21 +141,76 @@ class RAGGenerator(Generator):
         # 格式化上下文
         context_texts = []
         for i, result in enumerate(context):
-            text = self.config.context_format.format(
-                index=i+1,
-                text=result.chunk.text,
-                score=result.score,
-                metadata=result.metadata
-            )
-            context_texts.append(text)
+            try:
+                # 修复：确保只传入格式化字符串需要的参数
+                format_args = {
+                    "index": i+1,
+                    "text": result.chunk.text,
+                    "score": result.score
+                }
+                
+                # 不再尝试直接传入metadata
+                text = self.config.context_format.format(**format_args)
+                context_texts.append(text)
+            except Exception as e:
+                # 如果格式化失败，使用简单格式
+                text = f"[{i+1}] {result.chunk.text}"
+                context_texts.append(text)
+                print(f"上下文格式化错误: {str(e)}")
             
         # 使用分隔符连接上下文
         context_text = self.config.context_separator.join(context_texts)
         
+        # 格式化对话历史（如果有）
+        history_text = ""
+        if conversation_history:
+            history_items = []
+            
+            # 检查conversation_history是否为字符串
+            if isinstance(conversation_history, str):
+                # 如果是字符串，直接使用
+                history_text = conversation_history
+            else:
+                # 如果是列表，处理每个消息
+                for msg in conversation_history:
+                    try:
+                        # 确保msg是字典
+                        if isinstance(msg, dict):
+                            history_items.append(
+                                self.config.history_format.format(**msg)
+                            )
+                        else:
+                            # 如果不是字典，转换为字符串
+                            history_items.append(str(msg))
+                    except Exception as e:
+                        # 如果格式化失败，尝试使用简单格式
+                        try:
+                            if isinstance(msg, dict):
+                                role = msg.get("role", "unknown")
+                                content = msg.get("content", "")
+                                history_items.append(f"{role}: {content}")
+                            else:
+                                history_items.append(str(msg))
+                        except Exception:
+                            # 如果还是失败，添加一个占位符
+                            history_items.append("[格式化错误的消息]")
+                        print(f"历史格式化错误: {str(e)}")
+                
+                history_text = self.config.history_separator.join(history_items)
+            
+            # 如果查询中已经包含了历史，就不再添加
+            if history_text and "对话历史" not in query:
+                query = f"对话历史:\n{history_text}\n\n当前问题: {query}"
+        
         # 使用模板格式化最终提示词
-        prompt = self.config.prompt_template.format(
-            context=context_text,
-            query=query
-        )
+        try:
+            prompt = self.config.prompt_template.format(
+                context=context_text,
+                query=query
+            )
+        except Exception as e:
+            # 如果格式化失败，使用简单格式
+            prompt = f"参考信息:\n{context_text}\n\n问题: {query}\n\n回答:"
+            print(f"提示词格式化错误: {str(e)}")
         
         return prompt 

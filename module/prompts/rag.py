@@ -56,13 +56,14 @@ TECHNICAL_RAG_TEMPLATE = {
 # 对话场景模板
 CONVERSATIONAL_RAG_TEMPLATE = {
     "prompt_template": (
-        "请以友好、自然的对话方式回答用户的问题。参考以下相关信息，但回答要简洁、易懂。"
-        "如果信息不足，可以礼貌地询问更多细节。\n\n"
+        "你是一个友好、专业的助手。请根据对话历史和参考信息，以自然、连贯的方式回答用户的问题。"
+        "如果参考信息中没有相关内容，可以基于常识回答，但请明确指出这一点。"
+        "保持回答简洁、易懂，并与之前的对话保持一致性。\n\n"
         "参考信息：\n{context}\n\n"
-        "用户问题：{query}\n\n"
+        "{query}\n\n"
         "回答："
     ),
-    "context_format": "信息{index}：{text}",
+    "context_format": "信息{index}（相关度：{score:.2f}）：{text}",
     "context_separator": "\n\n"
 }
 

@@ -14,6 +14,8 @@ from ..model.embedding import EmbeddingModel, EmbeddingOutput
 class RetrieverConfig(BaseModel):
     """检索器配置基类"""
     extra_params: Dict[str, Any] = {}  # 额外的特定实现参数
+    
+    model_config = {"arbitrary_types_allowed": True}
 
 
 @dataclass

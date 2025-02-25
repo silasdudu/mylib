@@ -2,7 +2,7 @@
 生成器模块，基于检索结果生成回答
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from pydantic import BaseModel
@@ -21,7 +21,8 @@ class GeneratorInput:
     """生成器输入"""
     query: str
     context: List[SearchResult]
-    metadata: Dict[str, Any] = None
+    conversation_history: Optional[List[Dict[str, Any]]] = None  # 对话历史
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -29,7 +30,7 @@ class GeneratorOutput:
     """生成器输出"""
     response: str
     context: List[SearchResult]
-    metadata: Dict[str, Any] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class Generator(ABC):
@@ -83,13 +84,15 @@ class Generator(ABC):
     def format_prompt(
         self,
         query: str,
-        context: List[SearchResult]
+        context: List[SearchResult],
+        conversation_history: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """格式化提示词
         
         Args:
             query: 查询文本
             context: 检索结果列表
+            conversation_history: 可选的对话历史
             
         Returns:
             格式化后的提示词

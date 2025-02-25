@@ -15,6 +15,8 @@ class HybridRetrieverConfig(RetrieverConfig):
     rrf_k: int = 60  # RRF方法的k参数
     normalize_scores: bool = True  # 是否对分数进行归一化
     dedup_results: bool = True  # 是否去重结果
+    
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class HybridRetriever(Retriever):

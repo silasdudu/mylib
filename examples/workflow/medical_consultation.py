@@ -1,179 +1,240 @@
 """
-医疗咨询示例应用，展示如何使用基础工具库构建医疗问答系统
+医疗咨询应用程序示例
+
+这个示例展示了如何构建一个医疗问答系统，结合了以下组件：
+- 医疗搜索引擎（支持多种搜索方式）
+- 医疗RAG系统（检索增强生成）
+- 医疗工作流（包括分类、扩展和响应选择）
+- 对话记忆管理
 """
+
+import os
+import sys
 import asyncio
-from datetime import datetime
-from pathlib import Path
-from typing import List, Optional
+import json
+from typing import Dict, List, Any, Optional, Tuple
 
-from base.dialogue.memory import (Memory, MemoryConfig, Message, MessageRole,
-                                ShortTermMemory)
-from base.model.interface import LargeModel, ModelConfig, ModelResponse
-from base.rag.chunking import ChunkerConfig, TextChunker
-from base.rag.document import DocumentParser, DocumentType, TextDocument
-from base.model.embedding import DenseEmbeddingModel, EmbeddingConfig
-from base.rag.generator import GeneratorConfig, RAGGenerator
-from base.rag.retriever import RetrieverConfig, VectorRetriever
-from base.search.engine import SearchConfig, SearchEngine, SearchResult
-from examples.workflow.medical import (MedicalConfig, MedicalContext,
-                                 MedicalWorkflow, QuestionClassifier,
-                                 QuestionExpander, QuestionType, ResponseSelector,
-                                 ResponseType)
+# 添加项目根目录到系统路径
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+# 导入模块
+from module.parsers.pdf import PDFParser
+from module.chunkers.text import TextChunker
+from module.models.embedding.custom import CustomEmbedding
+from module.vectordbs.chroma import ChromaVectorDB, ChromaVectorDBConfig
+from module.models.llm.custom import CustomLLM
+from module.models.rerank.custom import CustomReranker
 
-class SimpleMedicalClassifier(QuestionClassifier):
-    """简单的医疗问题分类器"""
+# 导入异步日志类
+from module.logging import AsyncLogger
+from module.logging.console_logger import ColoredConsoleHandler
+from module.logging.file_logger import FileHandler
+
+from examples.workflow.medical.search import MedicalSearchEngine, MedicalSearchConfig
+from examples.workflow.medical.retrieval import MedicalRAGSystem
+from examples.workflow.medical import (
+    MedicalQueryClassifier,
+    MedicalQueryExpander,
+    MedicalResponseSelector
+)
+
+# 配置日志
+# 创建日志目录
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# 创建异步日志记录器
+async_logger = AsyncLogger(module_name="examples.workflow.medical_consultation")
+
+async def setup_async_logger():
+    """设置异步日志记录器"""
+    # 添加彩色控制台处理器
+    console_handler = ColoredConsoleHandler(use_color=True)
+    async_logger.add_handler(console_handler)
     
-    async def classify(self, question: str, context=None) -> QuestionType:
-        """基于关键词的简单分类"""
-        medical_keywords = ["症状", "疼痛", "治疗", "医生", "药", "病", "检查"]
-        
-        if any(kw in question for kw in medical_keywords):
-            return QuestionType.MEDICAL
-        return QuestionType.GENERAL
+    # 添加文件处理器
+    log_file = os.path.join(LOG_DIR, 'medical_consultation.log')
+    file_handler = FileHandler(log_file)
+    async_logger.add_handler(file_handler)
     
-    async def validate(self, question: str) -> bool:
-        """简单的问题验证"""
-        return len(question.strip()) >= 5
+    # 启动日志记录器
+    await async_logger.start()
+    return async_logger
 
 
-class SimpleMedicalExpander(QuestionExpander):
-    """简单的医疗问题扩写器"""
+def load_medical_documents(rag_system: MedicalRAGSystem, docs_dir: str) -> None:
+    """加载医疗文档到RAG系统
     
-    async def expand(self, question: str, context: MedicalContext) -> str:
-        """扩写问题，添加上下文信息"""
-        history = context.chat_history[-3:] if context.chat_history else []
-        history_text = "\n".join(f"{msg.role}: {msg.content}" for msg in history)
-        
-        return f"""基于以下上下文回答问题：
-
-历史对话：
-{history_text}
-
-当前问题：{question}"""
+    Args:
+        rag_system: RAG系统实例
+        docs_dir: 文档目录
+    """
+    if not os.path.exists(docs_dir):
+        async_logger.warning(f"文档目录不存在: {docs_dir}")
+        return
     
-    async def generate_sub_questions(
-        self,
-        question: str,
-        context: MedicalContext
-    ) -> List[str]:
-        """生成相关的子问题"""
-        return [
-            f"这个症状持续多久了？",
-            f"是否进行过相关检查？",
-            f"有其他并发症状吗？"
-        ]
-
-
-class SimpleMedicalSelector(ResponseSelector):
-    """简单的医疗回应选择器"""
+    async_logger.info(f"开始加载医疗文档: {docs_dir}")
     
-    async def select_type(self, context: MedicalContext) -> ResponseType:
-        """基于简单规则选择回应类型"""
-        question = context.question.lower()
-        
-        if len(context.chat_history) <= 1:
-            return ResponseType.ENCOURAGE
-        elif "?" in question or "？" in question:
-            return ResponseType.CONFIRM
-        elif len(question) < 20:
-            return ResponseType.INQUIRY
-        else:
-            return ResponseType.ANSWER
+    # 创建PDF解析器和文本分块器
+    pdf_parser = PDFParser()
+    chunker = TextChunker(chunk_size=1000, chunk_overlap=200)
     
-    async def generate_response(
-        self,
-        response_type: ResponseType,
-        context: MedicalContext
-    ) -> str:
-        """生成对应类型的回应"""
-        if response_type == ResponseType.ENCOURAGE:
-            return "感谢您的咨询。为了更好地帮助您，能否详细描述一下您的具体症状？"
-        elif response_type == ResponseType.INQUIRY:
-            return "您提到的情况我了解了。请问：\n1. 这种情况持续多久了？\n2. 有没有其他不适？"
-        elif response_type == ResponseType.CONFIRM:
-            return f"""让我确认一下，您是说"{context.question}"，对吗？"""
-        else:
-            # 这里应该使用RAG和搜索结果生成专业回答
-            return "基于您的描述，我的建议是..."
-
-
-class SimpleSearchEngine(SearchEngine):
-    """简单的搜索引擎实现"""
-    
-    async def search(self, query: str, **kwargs) -> List[SearchResult]:
-        """模拟搜索结果"""
-        return [
-            SearchResult(
-                title="示例医疗文章",
-                url="https://example.com/medical/1",
-                snippet="这是一个相关的医疗信息片段...",
-                source="示例来源",
-                timestamp=datetime.now().isoformat()
-            )
-        ]
-    
-    async def get_content(self, url: str) -> str:
-        """获取网页内容"""
-        return "这是示例网页的内容..."
+    # 遍历目录中的PDF文件
+    for filename in os.listdir(docs_dir):
+        print(f"开始处理文件: {filename}")
+        if filename.endswith('.pdf'):
+            file_path = os.path.join(docs_dir, filename)
+            # 解析PDF文件
+            async_logger.info(f"解析PDF文件: {filename}")
+            text = pdf_parser.parse(file_path)
+            
+            # 分块
+            chunks = chunker.create_chunks(text)
+            async_logger.info(f"从 {filename} 创建了 {len(chunks)} 个文本块")
+            
+            # 添加到RAG系统
+            for chunk in chunks:
+                # 设置元数据
+                chunk.metadata['source'] = filename
+                # 异步添加文档
+                asyncio.create_task(rag_system.add_document(chunk.text, chunk.metadata))
+                
+    async_logger.info("医疗文档加载完成")
 
 
 async def main():
-    # 初始化配置
-    medical_config = MedicalConfig()
-    memory_config = MemoryConfig()
-    search_config = SearchConfig()
+    """主函数"""
+    # 初始化日志
+    await setup_async_logger()
     
-    # 初始化组件
-    memory = ShortTermMemory(max_messages=memory_config.short_term_size)
-    search_engine = SimpleSearchEngine(search_config)
+    async_logger.info("医疗咨询应用启动")
     
-    # 初始化医疗工作流
-    workflow = MedicalWorkflow(
-        classifier=SimpleMedicalClassifier(),
-        expander=SimpleMedicalExpander(),
-        selector=SimpleMedicalSelector()
+    print("开始初始化嵌入模型...")
+    # 初始化嵌入模型
+    embedding_model = CustomEmbedding()
+    print("嵌入模型初始化完成")
+    
+    print("开始初始化向量数据库...")
+    # 初始化向量数据库
+    vector_db_config = ChromaVectorDBConfig(
+        collection_name="medical_docs",
+        persist_directory=os.path.join(os.path.dirname(__file__), "data/vector_db"),
+        dimension=3584,  # 添加必需的向量维度参数
+        top_k=3,
+        distance_metric="cosine",
     )
+    vector_db = ChromaVectorDB(
+        config=vector_db_config,
+        logger=async_logger
+    )
+    print("向量数据库初始化完成")
     
-    print("医疗咨询助手已启动，请描述您的问题（输入'q'退出）：")
+    print("开始初始化RAG系统...")
+    # 初始化RAG系统
+    rag_system = MedicalRAGSystem(embedding_model=embedding_model, vector_db=vector_db)
+    print("RAG系统初始化完成")
     
+    print("开始加载医疗文档...")
+    # 加载医疗文档
+    docs_dir = os.path.join(os.path.dirname(__file__), "data/medical")
+    load_medical_documents(rag_system, docs_dir)
+    print("医疗文档加载完成")
+    
+    print("开始初始化LLM和重排序模型...")
+    # 初始化LLM和重排序模型
+    llm = CustomLLM()
+    reranker = CustomReranker()
+    print("LLM和重排序模型初始化完成")
+    
+    print("开始初始化搜索引擎...")
+    # 初始化搜索引擎
+    search_config = MedicalSearchConfig(
+        primary_engine="basic",
+        use_llm_filter=True,
+        use_reranker=True
+    )
+    search_engine = MedicalSearchEngine(config=search_config, llm=llm, reranker=reranker)
+    print("搜索引擎初始化完成")
+    
+    print("开始初始化查询分类器和扩展器...")
+    # 初始化查询分类器和扩展器
+    query_classifier = MedicalQueryClassifier(llm=llm)
+    query_expander = MedicalQueryExpander(llm=llm)
+    print("查询分类器和扩展器初始化完成")
+    
+    print("开始初始化响应选择器...")
+    # 初始化响应选择器
+    response_selector = MedicalResponseSelector(llm=llm)
+    print("响应选择器初始化完成")
+    
+    print("开始进入主对话循环...")
+    # 主对话循环
     while True:
         # 获取用户输入
-        user_input = input("\n您：").strip()
-        if user_input.lower() == 'q':
+        user_query = input("\n请输入您的医疗问题（输入'退出'结束对话）: ")
+        
+        # 检查是否退出
+        if user_query.lower() in ["退出", "exit", "quit"]:
             break
             
-        # 记录用户消息
-        user_message = Message(
-            role=MessageRole.USER,
-            content=user_input,
-            timestamp=datetime.now()
-        )
-        await memory.add(user_message)
+        print(f"处理查询: {user_query}")
+        async_logger.info(f"用户查询: {user_query}")
         
-        # 准备上下文
-        context = MedicalContext(
-            question=user_input,
-            question_type=QuestionType.GENERAL,
-            chat_history=await memory.get_recent(5),
-            doc_results=[],  # 这里应该添加实际的文档检索结果
-            web_results=await search_engine.search(user_input)
-        )
+        # 分类查询
+        print("开始分类查询...")
+        query_type = await query_classifier.classify(user_query)
+        print(f"查询类型: {query_type}")
+        async_logger.info(f"查询类型: {query_type}")
         
-        # 处理问题
-        response = await workflow.process(user_input, context)
+        # 根据查询类型处理
+        if query_type == "factual":
+            print("处理事实型查询...")
+            # 扩展查询
+            expanded_query = await query_expander.expand(user_query)
+            async_logger.info(f"扩展查询: {expanded_query}")
+            
+            # 从RAG系统检索相关文档
+            print("从RAG系统检索相关文档...")
+            rag_results = await rag_system.search(expanded_query, limit=5)
+            
+            # 从搜索引擎获取结果
+            print("从搜索引擎获取结果...")
+            search_results = await search_engine.search(expanded_query)
+            
+            # 合并上下文
+            contexts = []
+            for result in rag_results:
+                contexts.append(result.chunk.text)
+            for result in search_results:
+                contexts.append(result.content)
+            
+            # 生成响应
+            print("生成响应...")
+            response = await response_selector.generate_factual_response(user_query, contexts)
+            
+        elif query_type == "personal":
+            print("处理个人医疗咨询...")
+            response = await response_selector.generate_personal_response(user_query)
+            
+        elif query_type == "general":
+            print("处理一般医疗问题...")
+            response = await response_selector.generate_general_response(user_query)
+            
+        else:  # non_medical
+            print("处理非医疗问题...")
+            response = "这似乎不是一个医疗相关的问题。我是一个医疗咨询助手，主要回答与医疗健康相关的问题。"
         
-        # 记录助手回复
-        assistant_message = Message(
-            role=MessageRole.ASSISTANT,
-            content=response,
-            timestamp=datetime.now()
-        )
-        await memory.add(assistant_message)
-        
-        # 输出回复
-        print(f"\n助手：{response}")
+        # 输出响应
+        print("\n回答:", response)
+        async_logger.info(f"系统响应: {response[:100]}...")  # 只记录响应的前100个字符
+    
+    async_logger.info("医疗咨询应用正常关闭")
+    print("医疗咨询应用已关闭")
+    
+    # 关闭日志
+    await async_logger.stop()
 
 
 if __name__ == "__main__":
+    # 运行主函数
     asyncio.run(main()) 
