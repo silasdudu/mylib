@@ -75,7 +75,6 @@ tmp/
 *.pt
 *.pth 
 *.docx
-*.pdf
 *.txt
 *.csv
 *.json
